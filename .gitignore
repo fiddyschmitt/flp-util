@@ -1,0 +1,9 @@
+bin/
+obj/
+
+# Local FileLocator Pro index store used for development/testing
+.flpindex/
+
+# Export output
+out/
+*.csv
