@@ -15,12 +15,18 @@ namespace FlpUtil.Index;
 /// loose _N.fdt/.fdx/.fnm/... files). Lucene.NET 4.8's read-only Lucene3x codec is selected
 /// automatically by DirectoryReader.Open when it sees a pre-4.0 segments header.
 ///
-/// All Lucene contact is deliberately confined to this class.
+/// Lucene contact is confined to this class and to <see cref="IndexCostAnalyzer"/>, which needs
+/// the raw term enumerators to attribute index bytes.
 /// </summary>
 public sealed class FlpIndexReader : IDisposable
 {
     private readonly LuceneDirectory _directory;
     private readonly DirectoryReader _reader;
+
+    /// <summary>Raw reader, for byte-level analysis. Read-only; never wrap this in an IndexWriter.</summary>
+    internal DirectoryReader Raw => _reader;
+
+    internal LuceneDirectory Store => _directory;
 
     public FlpIndexReader(string indexPath)
     {

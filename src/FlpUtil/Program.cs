@@ -53,6 +53,13 @@ public static class Program
                 field: cmd.GetRequiredString("field"),
                 take: cmd.GetInt("take") ?? 20);
 
+        if (cmd.HasVerb("index", "cost"))
+            return IndexCostCommand.Run(
+                ResolvePath(cmd),
+                outputPath: cmd.GetString("out"),
+                top: cmd.GetInt("top") ?? 15,
+                delimiter: cmd.GetDelimiter("delimiter", ','));
+
         if (cmd.HasVerb("export"))
             return ExportCommand.Run(new ExportOptions
             {

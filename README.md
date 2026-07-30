@@ -83,6 +83,9 @@ flp-util index values (--path <store> | --name <index>) --field <name> [--take n
     Distinct values of one field with counts and decoded meaning. This is how the encodings
     above were established.
 
+flp-util index cost   (--path <store> | --name <index>) [--out <file.csv>] [--top n]
+    How many index bytes each file is responsible for. See below.
+
 flp-util export       (--path <store> | --name <index>) --out <file.csv>
                       [--include-folders] [--raw] [--delimiter <c|tab>] [--multi-value-sep <s>]
     Export every indexed item with all metadata to CSV.
@@ -103,6 +106,63 @@ raw_itemtype, raw_mid, raw_moddt, raw_modft, raw_name, raw_sizenr
 Timestamps are ISO-8601 UTC to the tick. Output is RFC 4180 with a UTF-8 BOM so Excel handles
 non-ASCII file names. Directories are excluded unless `--include-folders` is passed; `--raw` drops
 the decoded block.
+
+## Per-file index cost (`index cost`)
+
+`TermCount` is a poor proxy for index space: it tracks total term *occurrences*, so it overstates
+repetitive files, understates high-cardinality ones (GUIDs, hashes, minified JS), and ignores the
+flat per-document floor entirely. `index cost` measures the bytes instead.
+
+Each file gets **three buckets rather than one number**, because one of them genuinely cannot be
+divided:
+
+- **Exclusive** — bytes that exist solely because of this file and vanish with it: its positions
+  (`.prx`), its posting entries (`.frq`), its stored fields (`.fdt`/`.fdx`), its norms (`.nrm`), and
+  the dictionary entries for terms no other file has.
+- **Shared** — term-dictionary entries it holds jointly with other files. A term's text is written
+  **once** regardless of how many documents contain it, so removing any one holder saves nothing.
+  This is reported *whole*, with a co-owner count, and never divided — splitting it N ways would be
+  arithmetic dressed up as measurement.
+- **Belongs to no file** — per-term skip lists, `.tii`, `.fnm`, per-segment file headers.
+
+### Why the numbers are trustworthy
+
+Every byte is derived from the Lucene 3.0 encoding ([`LuceneFormat`](src/FlpUtil/Index/LuceneFormat.cs)),
+not estimated — `.frq` folds `freq == 1` into the doc-delta's low bit, `.prx` deltas restart per
+document, `.tis` elides the prefix shared with the previous term. The command then compares its
+computed total against each segment file's **actual** length and prints the difference:
+
+```
+segment                    actual       computed     residual
+.prx  positions         3,027,154      3,027,154            0   exact
+.frq  postings            916,033        822,855       93,178   +10.17% = per-term skip lists
+.fdt+.fdx stored        1,505,437      1,505,421           16   +0.00% = per-segment file headers
+.nrm  norms               210,093        210,085            8   +0.00% = per-segment file headers
+.tis  dictionary          980,370        979,972          398   +0.04% = file header + skip pointers
+.tii  dict index           13,121              0       13,121   index-wide, not per-file
+.fnm  field infos             276              0          276   index-wide, not per-file
+
+Accounting:
+  exclusive to one owner             6,220,076    93.5%
+  shared term dictionary               325,411     4.9%   (joint - not divided)
+  belongs to no file                   106,997     1.6%   (skip lists, .tii, .fnm, headers)
+  actual index size                  6,652,484   balances exactly
+```
+
+`.prx` — 45% of the index — reconciles to **zero**. No residual is left unexplained: the `.frq`
+leftover is identified by counting skip-list entries (27,762 entries at 3.4 bytes each), and the
+`.fdt`/`.nrm` residuals are exactly 4 bytes per segment file header. The books balance to the byte,
+so no cost is hidden in a rounding.
+
+Deleted documents get their own row — they occupy every byte they ever did until a merge drops them.
+
+### Caveats
+
+- A file's exclusive bytes are its share *of the index as it stands*. They are not a perfect
+  counterfactual: `.frq` doc-deltas and `.tis` prefixes are relative to neighbours, so deleting a
+  file would shift a few bytes onto its neighbour.
+- Per-document accumulators are held in memory (six arrays of `maxDoc`), and the analysis walks
+  every term's posting list once.
 
 ## Creating an index
 
@@ -135,6 +195,9 @@ Against an index of `C:\Users\Smith\Desktop\dev\go` + `C:\Users\Smith\Downloads`
 | `OtherFlagBits` | empty on every row — no unrecognised flag bits |
 | Deepest path | 9 levels, resolves correctly |
 | Export during `flpidx -update` | 6 concurrent exports, 0 failures |
+| `index cost` accounting | balances to the byte: 6,652,484 computed = 6,652,484 actual |
+| `index cost` file set | identical to `export`'s 5,583 paths, zero difference |
+| `index cost` `.prx` model | exact, zero residual on 45% of the index |
 
 ## Notes and limits
 
