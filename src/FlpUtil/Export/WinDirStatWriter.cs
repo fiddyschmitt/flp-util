@@ -1,4 +1,5 @@
 using System.Globalization;
+using FlpUtil.Cli;
 using FlpUtil.Index;
 
 namespace FlpUtil.Export;
@@ -58,7 +59,8 @@ public static class WinDirStatWriter
         string outputPath,
         IndexCostReport report,
         CostTree tree,
-        string rootLabel)
+        string rootLabel,
+        IProgressSink? progress = null)
     {
         string? directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
         if (!string.IsNullOrEmpty(directory))
@@ -99,6 +101,8 @@ public static class WinDirStatWriter
         // No BOM: every WinDirStat 2.x handles its absence, but only 2.7+ skips one if present.
         using var stream = File.Create(outputPath);
         using var csv = new CsvWriter(stream, ',', writeBom: false);
+        using IProgressScope scope = (progress ?? NullProgress.Instance)
+            .Begin("writing rows", rootFiles + rootFolders + 1);
 
         csv.WriteRow(WinDirStatFormat.RequiredColumns);
 
@@ -133,6 +137,7 @@ public static class WinDirStatWriter
                 folderRows++;
 
                 EmitLeaves(csv, node, ref fileRows, ref syntheticRows, ref unsafeValues);
+                scope.Report(fileRows + folderRows + syntheticRows);
             }
 
             EmitLeaves(csv, driveNode, ref fileRows, ref syntheticRows, ref unsafeValues);

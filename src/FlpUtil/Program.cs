@@ -1,6 +1,7 @@
 using System.Text;
 using FlpUtil.Cli;
 using FlpUtil.Commands;
+using FlpUtil.Export;
 using FlpUtil.Flp;
 
 namespace FlpUtil;
@@ -33,11 +34,14 @@ public static class Program
         if (cmd.Verbs.Count == 0 || cmd.HasVerb("help") || cmd.HasFlag("help") || cmd.HasFlag("h"))
             return PrintUsage();
 
+        // Progress goes to stderr, so redirecting stdout to a file still gives clean output.
+        IProgressSink progress = cmd.HasFlag("quiet") ? NullProgress.Instance : new ConsoleProgress();
+
         if (cmd.HasVerb("index", "list"))
             return IndexListCommand.Run();
 
         if (cmd.HasVerb("index", "info"))
-            return IndexInfoCommand.Run(ResolvePath(cmd));
+            return IndexInfoCommand.Run(ResolvePath(cmd), progress);
 
         if (cmd.HasVerb("index", "dump"))
             return IndexDumpCommand.Run(
@@ -51,7 +55,8 @@ public static class Program
             return IndexValuesCommand.Run(
                 ResolvePath(cmd),
                 field: cmd.GetRequiredString("field"),
-                take: cmd.GetInt("take") ?? 20);
+                take: cmd.GetInt("take") ?? 20,
+                progress);
 
         if (cmd.HasVerb("index", "cost"))
             return IndexCostCommand.Run(
@@ -60,14 +65,16 @@ public static class Program
                 top: cmd.GetInt("top") ?? 15,
                 delimiter: cmd.GetDelimiter("delimiter", ','),
                 byFolder: cmd.HasFlag("by-folder"),
-                depth: cmd.GetInt("depth") ?? 0);
+                depth: cmd.GetInt("depth") ?? 0,
+                progress);
 
         if (cmd.HasVerb("index", "treemap"))
             return IndexTreemapCommand.Run(
                 ResolvePath(cmd),
                 outputPath: cmd.GetRequiredString("out"),
                 label: cmd.GetString("label"),
-                open: cmd.HasFlag("open"));
+                open: cmd.HasFlag("open"),
+                progress);
 
         if (cmd.HasVerb("export"))
             return ExportCommand.Run(new ExportOptions
@@ -78,7 +85,7 @@ public static class Program
                 Raw = cmd.HasFlag("raw"),
                 Delimiter = cmd.GetDelimiter("delimiter", ','),
                 MultiValueSeparator = cmd.GetString("multi-value-sep") ?? "|",
-            });
+            }, progress);
 
         Console.Error.WriteLine($"flp-util: unknown command '{string.Join(' ', cmd.Verbs)}'.");
         return PrintUsage(toStdErr: true);
@@ -133,6 +140,10 @@ public static class Program
             Index selection:
               --path <store>   path to the index store folder
               --name <index>   name of an index registered with FileLocator Pro
+
+            Global:
+              --quiet          suppress progress reporting (progress goes to stderr, so stdout
+                               stays clean when redirected either way)
             """);
         return toStdErr ? 2 : 0;
     }

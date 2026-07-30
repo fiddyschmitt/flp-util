@@ -1,4 +1,5 @@
 using System.Text;
+using FlpUtil.Cli;
 using Lucene.Net.Documents;
 using Lucene.Net.Index;
 using Lucene.Net.Search;
@@ -120,8 +121,10 @@ public sealed class IndexCostReport
 /// Every model is verified: computed bytes per segment file are compared against the file's actual
 /// length, and the difference is reported as a residual instead of being absorbed.
 /// </summary>
-public sealed class IndexCostAnalyzer(FlpIndexReader reader)
+public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? progress = null)
 {
+    private readonly IProgressSink _progress = progress ?? NullProgress.Instance;
+
     private const string IndexOwner = "<index metadata>";
     private const string UnknownOwner = "<unattributed>";
     private const string DeletedOwner = "<deleted documents - reclaimed on optimise>";
@@ -140,7 +143,6 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
         var sharedTermBytes = new long[maxDoc];
         var sharedTermShare = new long[maxDoc];
         var sharedTermCount = new int[maxDoc];
-        var owners = new string[maxDoc];
         var isFolder = new bool[maxDoc];
         var ownFolderIds = new string[maxDoc];
         var parentFolderIds = new string[maxDoc];
@@ -165,6 +167,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
         // correctly-cased path.
         var realNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+        using (IProgressScope docProgress = _progress.Begin("reading documents", maxDoc))
         foreach (AtomicReaderContext leaf in raw.Leaves)
         {
             AtomicReader atomic = leaf.AtomicReader;
@@ -179,6 +182,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
             for (int local = 0; local < atomic.MaxDoc; local++)
             {
                 int global = leaf.DocBase + local;
+                docProgress.Report(global + 1);
 
                 // Deleted documents still occupy every byte they ever did until a merge drops
                 // them, so they are measured and given their own row rather than ignored.
@@ -218,21 +222,47 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
             }
         }
 
-        for (int docId = 0; docId < maxDoc; docId++)
-            owners[docId] = ResolveOwner(docKeys[docId], folders, realNames);
+        // Resolve each document to its owning row up front. Holding a row reference per document
+        // rather than a resolved path string per document matters on a large index: an item and its
+        // meta document name the same file, so the strings would otherwise be duplicated millions
+        // of times over.
+        var rows = new Dictionary<string, CostRow>(StringComparer.OrdinalIgnoreCase);
+        var rowByDoc = new CostRow[maxDoc];
+        using (IProgressScope resolveProgress = _progress.Begin("resolving paths", maxDoc))
+        {
+            for (int docId = 0; docId < maxDoc; docId++)
+            {
+                string owner = ResolveOwner(docKeys[docId], folders, realNames);
+                if (!rows.TryGetValue(owner, out CostRow? row))
+                    rows[owner] = row = new CostRow { Owner = owner };
+                rowByDoc[docId] = row;
+                resolveProgress.Report(docId + 1);
+            }
+        }
 
         // ---- pass two: postings, positions and the term dictionary --------------------------
         var termDocs = new List<int>();
 
+        // Lucene 3.x records a term count for the dictionary as a whole but not per field, so
+        // Terms.Count is -1 and this phase usually has no total. Rather than invent a percentage,
+        // report which segment and field is being walked - that is what tells you where you are.
+        using IProgressScope termProgress = _progress.Begin("measuring terms", CountTerms(raw));
+
+        int segmentNumber = 0;
         foreach (AtomicReaderContext leaf in raw.Leaves)
         {
+            segmentNumber++;
             AtomicReader atomic = leaf.AtomicReader;
             Fields fields = atomic.Fields;
             if (fields is null)
                 continue;
 
+            int fieldCount = fields.Count;
+            int fieldNumberInSegment = 0;
+
             foreach (string fieldName in fields)
             {
+                fieldNumberInSegment++;
                 Terms terms = fields.GetTerms(fieldName);
                 if (terms is null)
                     continue;
@@ -243,6 +273,9 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
                 bool hasPositions = terms.HasPositions;
                 bool fieldPayloads = terms.HasPayloads;
                 hasPayloads |= fieldPayloads;
+                termProgress.Detail($"{fieldName} (field {fieldNumberInSegment}"
+                    + (fieldCount > 0 ? $"/{fieldCount}" : string.Empty)
+                    + $", segment {segmentNumber}/{raw.Leaves.Count})");
 
                 // .tis elides the prefix shared with the previous term, and resets at field
                 // boundaries; the pointer deltas are the previous term's data lengths.
@@ -258,6 +291,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
                     var term = termsEnum.Term;
                     int docFrequency = termsEnum.DocFreq;
                     skipEntries += LuceneFormat.SkipEntryCount(docFrequency);
+                    termProgress.Tick();
 
                     termDocs.Clear();
                     long termFreqBytes = 0, termProxBytes = 0;
@@ -340,12 +374,9 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
         }
 
         // ---- fold per-document numbers into per-owner rows ----------------------------------
-        var rows = new Dictionary<string, CostRow>(StringComparer.OrdinalIgnoreCase);
         for (int docId = 0; docId < maxDoc; docId++)
         {
-            string owner = owners[docId];
-            if (!rows.TryGetValue(owner, out CostRow? row))
-                rows[owner] = row = new CostRow { Owner = owner };
+            CostRow row = rowByDoc[docId];
 
             // A directory contributes several documents - a folder-tree entry plus item and meta
             // documents - and they can arrive in any order, so folder-ness is OR'd in rather than
@@ -387,6 +418,34 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
             SkipEntries = skipEntries,
             Folders = folders,
         };
+    }
+
+    /// <summary>
+    /// Total number of terms, so the term pass can show a percentage. The Lucene 3.x dictionary
+    /// records its term count, but <c>Terms.Count</c> is allowed to return -1; when any field
+    /// declines to answer we report progress without a total rather than inventing one.
+    /// </summary>
+    private static long CountTerms(DirectoryReader raw)
+    {
+        long total = 0;
+        foreach (AtomicReaderContext leaf in raw.Leaves)
+        {
+            Fields fields = leaf.AtomicReader.Fields;
+            if (fields is null)
+                continue;
+
+            foreach (string field in fields)
+            {
+                Terms terms = fields.GetTerms(field);
+                if (terms is null)
+                    continue;
+                if (terms.Count < 0)
+                    return -1;
+                total += terms.Count;
+            }
+        }
+
+        return total;
     }
 
     /// <summary>Walks one document's positions, measuring the bytes they occupy in <c>.prx</c>.</summary>
@@ -453,7 +512,23 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
         long stored, long postings, long positions, long dictionary, long norms)
     {
         var actual = new Dictionary<string, long>(StringComparer.Ordinal);
+        var counted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         long total = 0;
+
+        void CountFile(LuceneDirectory source, string file)
+        {
+            string extension = Path.GetExtension(file);
+            if (extension is not (".fdt" or ".fdx" or ".nrm" or ".frq" or ".prx" or ".tis" or ".tii" or ".fnm"))
+                return;
+
+            // A shared doc store is referenced by several segments, so names are deduplicated.
+            if (!counted.Add(file))
+                return;
+
+            long length = source.FileLength(file);
+            actual[extension] = actual.GetValueOrDefault(extension) + length;
+            total += length;
+        }
 
         foreach (AtomicReaderContext leaf in raw.Leaves)
         {
@@ -472,20 +547,43 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
                     source = compound;
                 }
 
+                // For a compound segment `source` is that segment's .cfs, so every entry belongs to
+                // it. For a loose segment `source` is the whole store, which also holds every other
+                // segment's files - so restrict to this segment's own prefix or the totals would be
+                // counted once per segment.
+                string prefix = info.Name + ".";
+
                 foreach (string file in source.ListAll())
                 {
-                    string extension = Path.GetExtension(file);
-                    if (extension is not (".fdt" or ".fdx" or ".nrm" or ".frq" or ".prx" or ".tis" or ".tii" or ".fnm"))
+                    if (!info.UseCompoundFile && !file.StartsWith(prefix, StringComparison.Ordinal))
                         continue;
-
-                    long length = source.FileLength(file);
-                    actual[extension] = actual.GetValueOrDefault(extension) + length;
-                    total += length;
+                    CountFile(source, file);
                 }
             }
             finally
             {
                 compound?.Dispose();
+            }
+        }
+
+        // Lucene 3.x lets several segments share one doc store, and when it is compound the stored
+        // fields live in <name>.cfx rather than in any segment's .cfs. Missing these makes the
+        // .fdt/.fdx actuals read as zero while the computed figure is right, so they have to be
+        // opened separately. Lucene deletes unreferenced files, so every .cfx present is in use.
+        foreach (string file in reader.Store.ListAll())
+        {
+            if (!file.EndsWith(".cfx", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            try
+            {
+                using var docStore = new CompoundFileDirectory(reader.Store, file, IOContext.READ_ONCE, false);
+                foreach (string entry in docStore.ListAll())
+                    CountFile(docStore, entry);
+            }
+            catch (IOException)
+            {
+                // An unreadable doc store shows up as a residual rather than being silently ignored.
             }
         }
 

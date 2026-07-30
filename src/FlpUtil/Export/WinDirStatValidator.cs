@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using FlpUtil.Cli;
 
 namespace FlpUtil.Export;
 
@@ -28,19 +29,23 @@ public sealed class WinDirStatValidation
 /// </summary>
 public static class WinDirStatValidator
 {
-    public static WinDirStatValidation Validate(string path)
+    public static WinDirStatValidation Validate(string path, IProgressSink? progress = null)
     {
         var result = new WinDirStatValidation();
 
-        // WinDirStat reads bytes as UTF-8 and skips a BOM if present.
-        string[] lines = File.ReadAllLines(path, Encoding.UTF8);
-        if (lines.Length == 0)
+        // Streamed rather than slurped: on a large index this file has millions of rows.
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        using IProgressScope scope = (progress ?? NullProgress.Instance).Begin("verifying", stream.Length);
+
+        string? headerLine = reader.ReadLine();
+        if (headerLine is null)
         {
             result.Errors.Add("File is empty.");
             return result;
         }
 
-        List<string> header = SplitLine(lines[0].TrimStart('﻿'));
+        List<string> header = SplitLine(headerLine.TrimStart('﻿'));
         var columnIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < header.Count; i++)
             columnIndex.TryAdd(header[i], i);
@@ -64,18 +69,22 @@ public static class WinDirStatValidator
         int roots = 0;
         string? rootName = null;
 
-        for (int lineNumber = 1; lineNumber < lines.Length; lineNumber++)
+        int lineNumber = 1;
+        while (reader.ReadLine() is { } line)
         {
-            if (lines[lineNumber].Length == 0)
+            lineNumber++;
+            scope.Report(stream.Position);
+
+            if (line.Length == 0)
                 continue; // WinDirStat skips blank lines
 
-            List<string> fields = SplitLine(lines[lineNumber]);
+            List<string> fields = SplitLine(line);
             result.DataRows++;
 
             if (fields.Count <= maxRequired)
             {
                 result.DroppedRows++;
-                Note(result, $"line {lineNumber + 1}: only {fields.Count} fields, need more than {maxRequired}.");
+                Note(result, $"line {lineNumber}: only {fields.Count} fields, need more than {maxRequired}.");
                 continue;
             }
 
@@ -88,7 +97,7 @@ public static class WinDirStatValidator
 
             if (!WinDirStatFormat.IsSafeValue(name))
             {
-                result.Errors.Add($"line {lineNumber + 1}: name contains a double quote, which WinDirStat cannot parse.");
+                result.Errors.Add($"line {lineNumber}: name contains a double quote, which WinDirStat cannot parse.");
                 continue;
             }
 
@@ -108,7 +117,7 @@ public static class WinDirStatValidator
                 if (rootName is null)
                 {
                     result.DroppedRows++;
-                    Note(result, $"line {lineNumber + 1}: drive '{name}' appears before any root item.");
+                    Note(result, $"line {lineNumber}: drive '{name}' appears before any root item.");
                     continue;
                 }
 
@@ -123,7 +132,7 @@ public static class WinDirStatValidator
                 // accepts the row; the crash comes later, so this has to be caught here.
                 if (rootName is not null && string.Equals(parentPath, rootName, StringComparison.OrdinalIgnoreCase))
                 {
-                    result.Errors.Add($"line {lineNumber + 1}: '{name}' hangs directly off the root item. "
+                    result.Errors.Add($"line {lineNumber}: '{name}' hangs directly off the root item. "
                         + "Only drives may be children of an IT_MYCOMPUTER root - anything else crashes "
                         + "WinDirStat with an access violation.");
                     continue;
@@ -133,9 +142,9 @@ public static class WinDirStatValidator
                 {
                     result.DroppedRows++;
                     Note(result, childless.Contains(parentPath)
-                        ? $"line {lineNumber + 1}: parent '{parentPath}' of '{name}' reports 0 files and 0 folders, "
+                        ? $"line {lineNumber}: parent '{parentPath}' of '{name}' reports 0 files and 0 folders, "
                             + "so WinDirStat never registered it as a parent."
-                        : $"line {lineNumber + 1}: parent '{parentPath}' of '{name}' was not defined by an earlier row.");
+                        : $"line {lineNumber}: parent '{parentPath}' of '{name}' was not defined by an earlier row.");
                     continue;
                 }
 

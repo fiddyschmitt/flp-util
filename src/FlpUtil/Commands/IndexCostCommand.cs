@@ -1,4 +1,5 @@
 using System.Globalization;
+using FlpUtil.Cli;
 using FlpUtil.Export;
 using FlpUtil.Index;
 
@@ -14,7 +15,8 @@ namespace FlpUtil.Commands;
 /// </summary>
 public static class IndexCostCommand
 {
-    public static int Run(string indexPath, string? outputPath, int top, char delimiter, bool byFolder, int depth)
+    public static int Run(string indexPath, string? outputPath, int top, char delimiter, bool byFolder,
+        int depth, IProgressSink? progress = null)
     {
         using var reader = new FlpIndexReader(indexPath);
 
@@ -22,7 +24,7 @@ public static class IndexCostCommand
         Console.WriteLine($"  {reader.NumDocs:N0} live documents, {reader.NumDeletedDocs:N0} deleted");
         Console.WriteLine();
 
-        IndexCostReport report = new IndexCostAnalyzer(reader).Analyze();
+        IndexCostReport report = new IndexCostAnalyzer(reader, progress).Analyze();
 
         PrintReconciliation(report);
         PrintSummary(report);
@@ -115,6 +117,15 @@ public static class IndexCostCommand
 
         if (check.Computed == 0 && check.Actual > 0)
             return "index-wide, not per-file";
+
+        // A negative residual means we computed more than the file holds, which is a modelling
+        // fault rather than an unattributed remainder - say so instead of dressing it as a header.
+        if (check.Residual < 0)
+        {
+            return check.Actual == 0
+                ? "OVER-COUNTED: no such file found in the store"
+                : $"OVER-COUNTED by {-check.Residual:N0} bytes";
+        }
 
         string percent = $"{100.0 * check.Residual / Math.Max(check.Actual, 1):+0.00;-0.00}%";
 

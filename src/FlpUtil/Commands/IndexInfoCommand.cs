@@ -1,4 +1,5 @@
 using System.Xml.Linq;
+using FlpUtil.Cli;
 using FlpUtil.Index;
 
 namespace FlpUtil.Commands;
@@ -6,7 +7,7 @@ namespace FlpUtil.Commands;
 /// <summary>Summarises an index store: document counts, the on-disk files, and the real schema.</summary>
 public static class IndexInfoCommand
 {
-    public static int Run(string indexPath)
+    public static int Run(string indexPath, IProgressSink? progress = null)
     {
         using var reader = new FlpIndexReader(indexPath);
 
@@ -25,10 +26,14 @@ public static class IndexInfoCommand
         // Stored-only fields never show up in the indexed-field list, so scan the documents for
         // the authoritative column set.
         var storedFields = new SortedDictionary<string, int>(StringComparer.Ordinal);
-        foreach (var doc in reader.ReadAll())
+        using (IProgressScope scope = (progress ?? NullProgress.Instance).Begin("scanning fields", reader.MaxDoc))
         {
-            foreach (var name in doc.Fields.Keys)
-                storedFields[name] = storedFields.GetValueOrDefault(name) + 1;
+            foreach (var doc in reader.ReadAll())
+            {
+                scope.Report(doc.DocId + 1);
+                foreach (var name in doc.Fields.Keys)
+                    storedFields[name] = storedFields.GetValueOrDefault(name) + 1;
+            }
         }
 
         var indexedFields = reader.IndexedFieldNames.ToHashSet(StringComparer.Ordinal);

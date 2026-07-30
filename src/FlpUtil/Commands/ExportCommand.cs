@@ -1,4 +1,5 @@
 using System.Globalization;
+using FlpUtil.Cli;
 using FlpUtil.Export;
 using FlpUtil.Index;
 
@@ -34,14 +35,15 @@ public static class ExportCommand
         "Attributes", "ItemType", "FolderId", "ItemId", "DocId", "MetaDocId",
     ];
 
-    public static int Run(ExportOptions options)
+    public static int Run(ExportOptions options, IProgressSink? progress = null)
     {
+        IProgressSink sink = progress ?? NullProgress.Instance;
         using var reader = new FlpIndexReader(options.IndexPath);
 
         Console.WriteLine($"Reading {reader.IndexPath}");
         Console.WriteLine($"  {reader.NumDocs:N0} live documents ({reader.NumDeletedDocs:N0} deleted)");
 
-        var scan = Scan(reader);
+        var scan = Scan(reader, sink);
         Console.WriteLine($"  {scan.Folders.Count:N0} folders, {scan.Meta.Count:N0} meta records, "
             + $"{scan.Fields.Count:N0} distinct stored fields");
 
@@ -60,9 +62,11 @@ public static class ExportCommand
         using (var csv = new CsvWriter(stream, options.Delimiter))
         {
             csv.WriteRow(header);
+            using IProgressScope writeScope = sink.Begin("pass 2/2 writing", reader.MaxDoc);
 
             foreach (var doc in reader.ReadAll())
             {
+                writeScope.Report(doc.DocId + 1);
                 if (!FlpSchema.IsItemDoc(doc))
                     continue;
 
@@ -115,14 +119,17 @@ public static class ExportCommand
         HashSet<string> Fields);
 
     /// <summary>Pass one: folder tree, meta lookup, and the union of stored field names.</summary>
-    private static ScanResult Scan(FlpIndexReader reader)
+    private static ScanResult Scan(FlpIndexReader reader, IProgressSink sink)
     {
         var folders = new FolderTree();
         var meta = new Dictionary<string, MetaRecord>(StringComparer.Ordinal);
         var fields = new HashSet<string>(StringComparer.Ordinal);
 
+        using IProgressScope scope = sink.Begin("pass 1/2 scanning", reader.MaxDoc);
+
         foreach (var doc in reader.ReadAll())
         {
+            scope.Report(doc.DocId + 1);
             if (FlpSchema.IsIndexDoc(doc))
                 continue;
 

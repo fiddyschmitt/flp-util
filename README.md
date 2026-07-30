@@ -84,11 +84,18 @@ flp-util index values (--path <store> | --name <index>) --field <name> [--take n
     above were established.
 
 flp-util index cost   (--path <store> | --name <index>) [--out <file.csv>] [--top n]
-    How many index bytes each file is responsible for. See below.
+                      [--by-folder] [--depth n]
+    How many index bytes each file, or each folder subtree, is responsible for. See below.
+
+flp-util index treemap (--path <store> | --name <index>) --out <file.csv> [--label <t>] [--open]
+    Write index cost as a WinDirStat saved-results file and verify it. See below.
 
 flp-util export       (--path <store> | --name <index>) --out <file.csv>
                       [--include-folders] [--raw] [--delimiter <c|tab>] [--multi-value-sep <s>]
     Export every indexed item with all metadata to CSV.
+
+Global:
+  --quiet             suppress progress reporting (progress goes to stderr regardless)
 ```
 
 ### CSV output
@@ -270,6 +277,66 @@ Against an index of `C:\Users\Smith\Desktop\dev\go` + `C:\Users\Smith\Downloads`
 | `index treemap` conformance | 8,150 rows, 0 dropped, every folder equals the sum of its children |
 | `index treemap` totals | root Physical + omitted = 6,652,484, the real store size |
 | Loads in WinDirStat 2.7.0.2722 | yes — verified via `/loadfrom`, tree and treemap populate, 6,862 files, 6.24 MiB physical / 5.93 MiB logical |
+
+### Also verified on a large, multi-segment index
+
+233,954 indexed items → **490,970 documents across 6 segments**, a 315 MB store with a shared
+compound doc store (`.cfx`):
+
+| Check | Result |
+|---|---|
+| Whole pipeline | 14 s for analyse + roll-up + write + verify |
+| `.prx` model | still **exact** — 0 residual on 55,347,629 bytes |
+| `.nrm` residual | 24 bytes = 6 segments × 4-byte header, exactly |
+| `.fdt`+`.fdx` residual | 8 bytes = 2 doc-store file headers, exactly |
+| `.frq` residual | 3,582,238 = 1,050,173 skip entries at 3.4 bytes — the same rate as the small index |
+| Attribution | 98.4% to documents, same as the small index |
+| `index treemap` | 257,024 rows, 0 dropped, child sums exact, root + omitted = 329,509,811 = the real store size |
+| WinDirStat load | 257k-row / 46 MB file loads and populates |
+
+Two bugs only this index could expose, both now fixed:
+
+- **Loose segments double-counted.** For a non-compound segment the reconciliation listed the whole
+  store directory, so every other segment's files were counted again. A single-segment compound index
+  hid it entirely.
+- **Shared compound doc stores were invisible.** Lucene 3.x may put several segments' stored fields in
+  a `<name>.cfx` instead of any segment's `.cfs`. Those were never opened, so `.fdt`/`.fdx` actuals
+  read as **zero** against a correct computed figure — which the totals check caught as a 54 MB
+  over-count rather than letting it pass.
+
+## Large indexes
+
+Every long pass reports progress, because on a big index these run for minutes:
+
+```
+  reading documents: 245,485/490,970 (50.0%) eta 00:02 [107,162/s]
+  measuring terms: 3,000,000 [841,673/s] content (field 1/17, segment 4/6)
+  writing rows: 128,512/257,024 (50.0%) eta 00:00
+  verifying: 24,138,752/48,277,099 (50.0%) eta 00:00
+```
+
+- Progress goes to **stderr**, so `flp-util index cost > report.txt` keeps a clean report while you
+  still watch progress — and piping stdout doesn't corrupt anything either.
+- On a console it rewrites one line with a rate and an ETA. When stderr is redirected it switches to
+  plain milestone lines every 15s, since carriage returns are useless in a log file.
+- Updates are rate-limited (200 ms) so reporting never becomes the bottleneck.
+- `--quiet` turns it off.
+
+Phases you will see: `reading documents` → `resolving paths` → `measuring terms` (usually the
+longest, since it walks every term's posting list and every position) → `writing rows` → `verifying`.
+
+`measuring terms` shows no percentage: Lucene 3.x records a term count for the dictionary as a whole
+but not per field, so `Terms.Count` is -1. Rather than invent a percentage it reports which field and
+segment is being walked, which is what actually tells you where you are.
+
+### Memory
+
+- `index cost` holds a handful of arrays sized by document count (~50 bytes/document) plus one row
+  per distinct path. A document's owning row is stored **by reference**, not as a resolved path
+  string per document — an item and its meta document name the same file, so storing strings would
+  duplicate every path.
+- `export` holds the folder tree plus a meta record per item; rows themselves stream.
+- The WinDirStat file is written and verified by **streaming**, never loaded into memory.
 
 ## Notes and limits
 

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using FlpUtil.Cli;
 using FlpUtil.Export;
 using FlpUtil.Flp;
 using FlpUtil.Index;
@@ -11,12 +12,14 @@ namespace FlpUtil.Commands;
 /// </summary>
 public static class IndexTreemapCommand
 {
-    public static int Run(string indexPath, string outputPath, string? label, bool open)
+    public static int Run(string indexPath, string outputPath, string? label, bool open,
+        IProgressSink? progress = null)
     {
+        IProgressSink sink = progress ?? NullProgress.Instance;
         using var reader = new FlpIndexReader(indexPath);
 
         Console.WriteLine($"Analysing {reader.IndexPath}");
-        IndexCostReport report = new IndexCostAnalyzer(reader).Analyze();
+        IndexCostReport report = new IndexCostAnalyzer(reader, sink).Analyze();
         CostTree tree = CostTree.Build(report);
 
         Console.WriteLine($"  {tree.Nodes.Count:N0} folders, {tree.Roots.Count:N0} root(s)");
@@ -27,7 +30,7 @@ public static class IndexTreemapCommand
         }
 
         string rootLabel = label ?? DefaultLabel(reader.IndexPath);
-        WinDirStatWriteResult written = WinDirStatWriter.Write(outputPath, report, tree, rootLabel);
+        WinDirStatWriteResult written = WinDirStatWriter.Write(outputPath, report, tree, rootLabel, sink);
         string fullPath = Path.GetFullPath(outputPath);
 
         Console.WriteLine();
@@ -53,7 +56,7 @@ public static class IndexTreemapCommand
         }
 
         Console.WriteLine();
-        if (!Verify(fullPath, written))
+        if (!Verify(fullPath, written, sink))
             return 1;
 
         Console.WriteLine();
@@ -88,9 +91,9 @@ public static class IndexTreemapCommand
     /// Re-reads the file with WinDirStat's own rules. Worth doing every time: WinDirStat drops
     /// unattachable rows and rejects malformed files without saying anything at all.
     /// </summary>
-    private static bool Verify(string path, WinDirStatWriteResult written)
+    private static bool Verify(string path, WinDirStatWriteResult written, IProgressSink sink)
     {
-        WinDirStatValidation validation = WinDirStatValidator.Validate(path);
+        WinDirStatValidation validation = WinDirStatValidator.Validate(path, sink);
 
         Console.WriteLine("Conformance check (WinDirStat's own load rules):");
         Console.WriteLine($"  data rows       {validation.DataRows,10:N0}");

@@ -1,4 +1,5 @@
 using System.Globalization;
+using FlpUtil.Cli;
 using FlpUtil.Index;
 
 namespace FlpUtil.Commands;
@@ -10,19 +11,23 @@ namespace FlpUtil.Commands;
 /// </summary>
 public static class IndexValuesCommand
 {
-    public static int Run(string indexPath, string field, int take)
+    public static int Run(string indexPath, string field, int take, IProgressSink? progress = null)
     {
         using var reader = new FlpIndexReader(indexPath);
 
         var counts = new Dictionary<string, long>(StringComparer.Ordinal);
         long total = 0;
 
-        foreach (var doc in reader.ReadAll())
+        using (IProgressScope scope = (progress ?? NullProgress.Instance).Begin("scanning", reader.MaxDoc))
         {
-            foreach (string value in doc.GetAll(field))
+            foreach (var doc in reader.ReadAll())
             {
-                counts[value] = counts.GetValueOrDefault(value) + 1;
-                total++;
+                scope.Report(doc.DocId + 1);
+                foreach (string value in doc.GetAll(field))
+                {
+                    counts[value] = counts.GetValueOrDefault(value) + 1;
+                    total++;
+                }
             }
         }
 
