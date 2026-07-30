@@ -18,6 +18,19 @@ public sealed class FolderTree
 
     public int Count => _folders.Count;
 
+    /// <summary>Every folder id in the index.</summary>
+    public IEnumerable<string> FolderIds => _folders.Keys;
+
+    /// <summary>Parent folder id, or null when this is a root (its <c>fldrpid</c> was "root").</summary>
+    public string? ParentOf(string folderId) =>
+        _folders.TryGetValue(folderId, out Node? node) ? node.ParentId : null;
+
+    /// <summary>Bare folder name as stored, e.g. <c>Desktop</c> or the root's <c>\\?\C:</c>.</summary>
+    public string NameOf(string folderId) =>
+        _folders.TryGetValue(folderId, out Node? node) ? node.Name : string.Empty;
+
+    public bool Contains(string folderId) => _folders.ContainsKey(folderId);
+
     public void Add(IndexDoc doc)
     {
         string? id = doc.Get(FlpSchema.FolderId);

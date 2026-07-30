@@ -54,6 +54,34 @@ public static class FlpConfig
         }
     }
 
+    /// <summary>
+    /// Locates a WinDirStat executable so a generated treemap file can be opened directly. Portable
+    /// copies are common, so an explicit <c>WINDIRSTAT_PATH</c> (file or folder) wins over the
+    /// installed locations.
+    /// </summary>
+    public static string? FindWinDirStat()
+    {
+        var candidates = new List<string>();
+
+        if (Environment.GetEnvironmentVariable("WINDIRSTAT_PATH") is { Length: > 0 } configured)
+        {
+            candidates.Add(configured);
+            candidates.Add(Path.Combine(configured, "WinDirStat.exe"));
+        }
+
+        foreach (var root in new[]
+                 {
+                     Environment.GetEnvironmentVariable("ProgramFiles"),
+                     Environment.GetEnvironmentVariable("ProgramFiles(x86)"),
+                 })
+        {
+            if (!string.IsNullOrEmpty(root))
+                candidates.Add(Path.Combine(root, "WinDirStat", "WinDirStat.exe"));
+        }
+
+        return candidates.FirstOrDefault(c => c.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && File.Exists(c));
+    }
+
     /// <summary>Every index registered with FileLocator Pro for the current user.</summary>
     public static IReadOnlyList<FlpIndexRef> ListIndexes()
     {

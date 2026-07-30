@@ -14,7 +14,7 @@ namespace FlpUtil.Commands;
 /// </summary>
 public static class IndexCostCommand
 {
-    public static int Run(string indexPath, string? outputPath, int top, char delimiter)
+    public static int Run(string indexPath, string? outputPath, int top, char delimiter, bool byFolder, int depth)
     {
         using var reader = new FlpIndexReader(indexPath);
 
@@ -29,13 +29,54 @@ public static class IndexCostCommand
 
         PrintClosure(report);
 
-        var files = report.Rows.Where(r => !r.IsFolder && !r.Owner.StartsWith('<')).ToList();
-        PrintTop(files, report, top);
+        if (byFolder)
+        {
+            PrintFolders(report, top, depth);
+        }
+        else
+        {
+            var files = report.Rows.Where(r => !r.IsFolder && !r.Owner.StartsWith('<')).ToList();
+            PrintTop(files, report, top);
+        }
 
         if (outputPath is not null)
             WriteCsv(report, outputPath, delimiter);
 
         return 0;
+    }
+
+    /// <summary>
+    /// Folders ranked by what their whole subtree costs — the view that answers "which folder should
+    /// I stop indexing?". Each folder's own entry cost is shown separately from its descendants', so
+    /// a folder that is expensive only because of one child is distinguishable from one that is
+    /// expensive throughout.
+    /// </summary>
+    private static void PrintFolders(IndexCostReport report, int top, int depth)
+    {
+        CostTree tree = CostTree.Build(report);
+
+        if (tree.Orphans.Count > 0)
+            Console.WriteLine($"warning: {tree.Orphans.Count:N0} row(s) are not under any folder.");
+
+        var ranked = tree.ByCostDescending()
+            .Where(n => depth <= 0 || n.Depth <= depth)
+            .Take(top)
+            .ToList();
+
+        Console.WriteLine($"Top {ranked.Count} folders by subtree cost"
+            + (depth > 0 ? $" (depth <= {depth})" : string.Empty) + ":");
+        Console.WriteLine($"  {"subtree",14} {"exclusive",14} {"own",8} {"files",8} {"dirs",7}  folder");
+
+        foreach (CostNode node in ranked)
+        {
+            Console.WriteLine($"  {node.SubtreeApportionedBytes,14:N0} {node.SubtreeExclusiveBytes,14:N0} "
+                + $"{node.OwnExclusiveBytes,8:N0} {node.SubtreeFileCount,8:N0} {node.SubtreeFolderCount,7:N0}  "
+                + Shorten(node.Path));
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("  subtree = including apportioned shared dictionary; exclusive = reclaimed if excluded;");
+        Console.WriteLine("  own = this folder's own index documents, not its contents.");
     }
 
     private static void PrintReconciliation(IndexCostReport report)

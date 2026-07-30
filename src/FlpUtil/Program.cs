@@ -58,7 +58,16 @@ public static class Program
                 ResolvePath(cmd),
                 outputPath: cmd.GetString("out"),
                 top: cmd.GetInt("top") ?? 15,
-                delimiter: cmd.GetDelimiter("delimiter", ','));
+                delimiter: cmd.GetDelimiter("delimiter", ','),
+                byFolder: cmd.HasFlag("by-folder"),
+                depth: cmd.GetInt("depth") ?? 0);
+
+        if (cmd.HasVerb("index", "treemap"))
+            return IndexTreemapCommand.Run(
+                ResolvePath(cmd),
+                outputPath: cmd.GetRequiredString("out"),
+                label: cmd.GetString("label"),
+                open: cmd.HasFlag("open"));
 
         if (cmd.HasVerb("export"))
             return ExportCommand.Run(new ExportOptions
@@ -100,6 +109,19 @@ public static class Program
 
               flp-util index values (--path <store> | --name <index>) --field <name> [--take <n>]
                   Distinct values of one stored field, with counts and decoded meaning.
+
+              flp-util index cost   (--path <store> | --name <index>) [options]
+                  How many index bytes each file, or each folder, is responsible for.
+                    --by-folder       rank folders by subtree cost instead of listing files
+                    --depth <n>       with --by-folder, only folders at or above this depth
+                    --top <n>         rows to print (default 15)
+                    --out <file.csv>  also write the full per-owner breakdown
+
+              flp-util index treemap (--path <store> | --name <index>) --out <file.csv> [options]
+                  Write index cost as a WinDirStat saved-results file, then verify it against
+                  WinDirStat's own load rules.
+                    --label <text>    name for the root node (default "FLP index: <store>")
+                    --open            launch WinDirStat with /loadfrom on the result
 
               flp-util export       (--path <store> | --name <index>) --out <file.csv> [options]
                   Export every indexed item, with all metadata, to CSV.

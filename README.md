@@ -164,6 +164,74 @@ Deleted documents get their own row — they occupy every byte they ever did unt
 - Per-document accumulators are held in memory (six arrays of `maxDoc`), and the analysis walks
   every term's posting list once.
 
+## Per-folder cost, and the WinDirStat view
+
+`index cost --by-folder` ranks folders by what their whole subtree costs, which is the view that
+answers *"which folder should I stop indexing?"* — a tree of huge log files full of near-random
+tokens is expensive to index and worthless to search.
+
+For navigating that interactively, `index treemap` writes a **WinDirStat saved-results file**, so
+WinDirStat's tree/list view and treemap can be pointed at index cost instead of disk usage:
+
+```
+flp-util index treemap --name "my-index" --out index-cost.wds.csv --open
+WinDirStat.exe /loadfrom index-cost.wds.csv
+```
+
+- `Logical Size` = exclusive bytes (what excluding it reclaims); `Physical Size` = exclusive plus the
+  item's apportioned share of the joint dictionary. WinDirStat's logical/physical treemap option
+  toggles which drives the view, so both live in one file.
+- Each folder gets a synthetic `<folder entry>` leaf holding its own index documents, so **every
+  folder's size equals the sum of its children exactly**.
+- The extension pane becomes an instant breakdown of cost by file type.
+
+### The WinDirStat results format
+
+Reverse-engineered from `windirstat/CsvLoader.cpp`, `Item.h`, `Constants.h` and
+`res/langs/lang_en.txt` at tag `release/v2.7.0`; the load path is byte-identical to `master`.
+Implemented in [`WinDirStatFormat`](src/FlpUtil/Export/WinDirStatFormat.cs) /
+[`WinDirStatWriter`](src/FlpUtil/Export/WinDirStatWriter.cs).
+
+UTF-8, CRLF, no BOM needed (2.7+ skips one if present). Header — all nine required, matched by name
+so order is free:
+
+```
+"Name","Files","Folders","Logical Size","Physical Size","Attributes","Last Change","WinDirStat Attributes","Index"
+"C:\dir\file.txt",0,0,1438,1438,"A",2026-07-11T12:58:47Z,0x00000008,0x0000000000000000
+```
+
+| Rule | Why it matters |
+|---|---|
+| `Name` is the **full path** | WinDirStat splits at the last `\`: prefix = parent lookup key, suffix = display name. Root and drive rows use the whole value as the display name. |
+| **Parents before children** | The parent is looked up in a map built from earlier rows. A child listed first is silently **dropped**. |
+| **Containers need `Files + Folders > 0`** | `GetItemsCount() > 0` gates parent registration. A folder reporting zero items becomes a dead end and everything beneath it is dropped. |
+| **Sizes are not aggregated on load** | `AddChild(child, addOnly: true)` skips the upward size propagation, so every folder row must carry its own subtree total. |
+| **Only drives may be children of the root** | An `IT_MYCOMPUTER` root with a file or directory child **crashes WinDirStat** with an access violation. |
+| `WinDirStat Attributes` is the `ITEMTYPE` hex | `0x10000001` root, `0x00000002` drive, `0x00000004` directory, `0x00000008` file. |
+| `Attributes` is a subset of `RHSACEOZ` | Reparse `@` is deliberately absent — WinDirStat does not emit it either. |
+| Quoted fields end at the next `"` | There is no escaped-quote handling, so a value containing `"` corrupts every later column. Windows paths cannot contain one, and quoting `Name` is required because paths may contain commas. |
+| `Last Change` is `YYYY-MM-DDTHH:MM:SSZ` | Anything else silently decodes to the zero FILETIME, which displays as 1601. |
+
+That last-but-one rule was found the hard way. WinDirStat gives **no feedback** on a bad file — it
+either opens empty or segfaults — so `index treemap` always re-reads its own output through
+[`WinDirStatValidator`](src/FlpUtil/Export/WinDirStatValidator.cs), a deliberate port of
+WinDirStat's load rules (including its quirky field splitter, because a file only a *correct* CSV
+parser can read is a file WinDirStat cannot read). It refuses to report success if any row would be
+dropped.
+
+### What the treemap omits
+
+Bytes that belong to no path are left out rather than parked somewhere convenient — they cannot be
+reclaimed by excluding a folder, and attaching them to a drive would overstate it:
+
+```
+root Physical Size      6,544,194  (folders and files)
+omitted                   108,290  (index metadata, deleted documents, skip lists, .tii, .fnm, headers)
+actual store size       6,652,484  = root + omitted, exactly
+```
+
+## Creating an index
+
 ## Creating an index
 
 `flp-util` only reads indexes — create them with FLP's own tool:
@@ -198,6 +266,10 @@ Against an index of `C:\Users\Smith\Desktop\dev\go` + `C:\Users\Smith\Downloads`
 | `index cost` accounting | balances to the byte: 6,652,484 computed = 6,652,484 actual |
 | `index cost` file set | identical to `export`'s 5,583 paths, zero difference |
 | `index cost` `.prx` model | exact, zero residual on 45% of the index |
+| `index treemap` folder totals | 1,286 folders cross-checked by path-based summing of `cost.csv` against the id-based tree in the file — 0 mismatches |
+| `index treemap` conformance | 8,150 rows, 0 dropped, every folder equals the sum of its children |
+| `index treemap` totals | root Physical + omitted = 6,652,484, the real store size |
+| Loads in WinDirStat 2.7.0.2722 | yes — verified via `/loadfrom`, tree and treemap populate, 6,862 files, 6.24 MiB physical / 5.93 MiB logical |
 
 ## Notes and limits
 

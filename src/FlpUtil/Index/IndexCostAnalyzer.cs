@@ -38,9 +38,36 @@ public sealed record CostRow
 
     public int SharedTermCount { get; set; }
 
+    /// <summary>
+    /// This owner's share of the joint dictionary entries: each entry split by its co-owner count,
+    /// with the remainder distributed a byte at a time so the column sums to
+    /// <see cref="IndexCostReport.SharedDictionaryBytes"/> exactly. Unlike
+    /// <see cref="SharedTermBytes"/> this is an apportionment, not a removal cost.
+    /// </summary>
+    public long SharedTermBytesShare { get; set; }
+
     /// <summary>Bytes that exist solely because of this owner, and vanish with it.</summary>
     public long ExclusiveBytes =>
         StoredBytes + NormBytes + PostingBytes + PositionBytes + SoleTermBytes;
+
+    /// <summary>Exclusive bytes plus this owner's apportioned share of the joint dictionary.</summary>
+    public long ApportionedBytes => ExclusiveBytes + SharedTermBytesShare;
+
+    /// <summary>
+    /// This folder's own <c>fldrid</c>, set only from a folder-tree document. Empty for files.
+    /// Kept separate from <see cref="ParentFolderId"/> because a directory has both — its own id and
+    /// the id of the folder containing it — and conflating them would corrupt the hierarchy.
+    /// </summary>
+    public string OwnFolderId { get; set; } = string.Empty;
+
+    /// <summary>Id of the folder containing this owner, from its <c>{fldrid}:{name}</c> item key.</summary>
+    public string ParentFolderId { get; set; } = string.Empty;
+
+    /// <summary>Last-modified time recorded in the index, for tools that want to show a date.</summary>
+    public DateTime? LastChange { get; set; }
+
+    /// <summary>Raw hex <c>attrx</c> mask as FLP stored it.</summary>
+    public string? RawAttributes { get; set; }
 }
 
 public sealed record SegmentCheck(string File, long Actual, long Computed)
@@ -68,6 +95,17 @@ public sealed class IndexCostReport
     /// bytes as skip data instead of a gap in the model.
     /// </summary>
     public required long SkipEntries { get; init; }
+
+    /// <summary>The folder hierarchy, so callers can roll cost up the tree.</summary>
+    public required FolderTree Folders { get; init; }
+
+    /// <summary>
+    /// Bytes belonging to no document at all — per-term skip lists, <c>.tii</c>, <c>.fnm</c> and
+    /// per-segment file headers. Reported as its own quantity rather than smeared across rows.
+    /// </summary>
+    public long UnattributedBytes => Checks.Sum(c => c.Actual) - Checks.Sum(c => c.Computed);
+
+    public long ActualStoreBytes => Checks.Sum(c => c.Actual);
 }
 
 /// <summary>
@@ -100,9 +138,16 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
         var positionBytes = new long[maxDoc];
         var soleTermBytes = new long[maxDoc];
         var sharedTermBytes = new long[maxDoc];
+        var sharedTermShare = new long[maxDoc];
         var sharedTermCount = new int[maxDoc];
         var owners = new string[maxDoc];
         var isFolder = new bool[maxDoc];
+        var ownFolderIds = new string[maxDoc];
+        var parentFolderIds = new string[maxDoc];
+        var lastChange = new DateTime?[maxDoc];
+        var rawAttributes = new string?[maxDoc];
+        Array.Fill(ownFolderIds, string.Empty);
+        Array.Fill(parentFolderIds, string.Empty);
 
         bool hasPayloads = false;
         long computedStored = 0, computedPostings = 0, computedPositions = 0, computedDictionary = 0;
@@ -157,11 +202,18 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
                     folders.Add(doc);
                 docKeys[global] = Classify(doc);
                 isFolder[global] = IsFolderEvidence(doc);
+                (ownFolderIds[global], parentFolderIds[global]) = FolderIdsOf(docKeys[global]);
 
-                if (docKeys[global].Kind == DocKind.Item
-                    && doc.Get(FlpSchema.ItemName) is { Length: > 0 } realName)
+                if (docKeys[global].Kind == DocKind.Item)
                 {
-                    realNames[docKeys[global].Key] = realName;
+                    if (doc.Get(FlpSchema.ItemName) is { Length: > 0 } realName)
+                        realNames[docKeys[global].Key] = realName;
+
+                    // Only item documents carry the file's own metadata; keep enough of it for
+                    // downstream tools to show a date and attributes alongside the byte counts.
+                    lastChange[global] = FieldDecoders.TryParseFileTime(
+                        doc.Get(FlpSchema.Modified), FlpEncoding.DecimalFileTime);
+                    rawAttributes[global] = doc.Get(FlpSchema.Attributes);
                 }
             }
         }
@@ -263,9 +315,18 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
                         // full entry, and record the real total separately so nothing is
                         // double-counted at the index level.
                         sharedDictionary += entryBytes;
-                        foreach (int docId in termDocs)
+
+                        // Alongside that, an apportionment that does sum to the real total: an equal
+                        // integer split, with the remainder handed out a byte at a time so no byte
+                        // is invented or lost to rounding.
+                        long each = entryBytes / termDocs.Count;
+                        long remainder = entryBytes % termDocs.Count;
+
+                        for (int i = 0; i < termDocs.Count; i++)
                         {
+                            int docId = termDocs[i];
                             sharedTermBytes[docId] += entryBytes;
+                            sharedTermShare[docId] += each + (i < remainder ? 1 : 0);
                             sharedTermCount[docId]++;
                         }
                     }
@@ -292,6 +353,13 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
             if (isFolder[docId])
                 row.IsFolder = true;
 
+            if (ownFolderIds[docId].Length > 0)
+                row.OwnFolderId = ownFolderIds[docId];
+            if (parentFolderIds[docId].Length > 0)
+                row.ParentFolderId = parentFolderIds[docId];
+            row.LastChange ??= lastChange[docId];
+            row.RawAttributes ??= rawAttributes[docId];
+
             row.DocCount++;
             row.StoredBytes += storedBytes[docId];
             row.NormBytes += normBytes[docId];
@@ -299,6 +367,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
             row.PositionBytes += positionBytes[docId];
             row.SoleTermBytes += soleTermBytes[docId];
             row.SharedTermBytes += sharedTermBytes[docId];
+            row.SharedTermBytesShare += sharedTermShare[docId];
             row.SharedTermCount += sharedTermCount[docId];
         }
 
@@ -316,6 +385,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
             SharedDictionaryBytes = sharedDictionary,
             SoleDictionaryBytes = soleDictionary,
             SkipEntries = skipEntries,
+            Folders = folders,
         };
     }
 
@@ -442,6 +512,18 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader)
     /// document is judged the same way <see cref="Commands.ExportCommand"/> judges it, so the two
     /// commands agree on what counts as a file.
     /// </summary>
+    /// <summary>
+    /// Splits a document's folder relationship into (own id, parent id). A folder-tree document
+    /// declares the folder's own id; item and meta documents carry the id of the folder containing
+    /// them, embedded in their <c>{fldrid}:{name}</c> key.
+    /// </summary>
+    private static (string Own, string Parent) FolderIdsOf((DocKind Kind, string Key) doc) => doc.Kind switch
+    {
+        DocKind.Folder => (doc.Key, string.Empty),
+        DocKind.Item or DocKind.Meta => (string.Empty, FlpSchema.SplitItemId(doc.Key).FolderId),
+        _ => (string.Empty, string.Empty),
+    };
+
     private static bool IsFolderEvidence(IndexDoc doc)
     {
         if (FlpSchema.IsFolderDoc(doc))

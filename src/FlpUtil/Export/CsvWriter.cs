@@ -3,12 +3,13 @@ using System.Text;
 namespace FlpUtil.Export;
 
 /// <summary>
-/// RFC 4180 CSV writer. UTF-8 with a BOM so Excel opens non-ASCII file names correctly, and CRLF
-/// line endings so embedded newlines in a quoted field stay unambiguous.
+/// RFC 4180 CSV writer. UTF-8 and CRLF line endings, so embedded newlines in a quoted field stay
+/// unambiguous. A BOM is written by default so Excel opens non-ASCII file names correctly; consumers
+/// that predate BOM handling can turn it off.
 /// </summary>
-public sealed class CsvWriter(Stream stream, char delimiter = ',') : IDisposable
+public sealed class CsvWriter(Stream stream, char delimiter = ',', bool writeBom = true) : IDisposable
 {
-    private readonly StreamWriter _writer = new(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true))
+    private readonly StreamWriter _writer = new(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: writeBom))
     {
         NewLine = "\r\n",
     };
