@@ -56,7 +56,13 @@ public sealed class CostNode
 /// </summary>
 public sealed class CostTree
 {
+    /// <summary>
+    /// Folder id → node. After container unification several ids can map to one node, which is what
+    /// keeps cost rows referencing a merged id landing on the surviving node.
+    /// </summary>
     private readonly Dictionary<string, CostNode> _nodes = new(StringComparer.Ordinal);
+
+    private readonly List<CostNode> _distinctNodes = [];
 
     private CostTree()
     {
@@ -68,7 +74,13 @@ public sealed class CostTree
     /// <summary>Rows that could not be placed under any folder, so they are never silently lost.</summary>
     public List<CostRow> Orphans { get; } = [];
 
-    public IReadOnlyCollection<CostNode> Nodes => _nodes.Values;
+    /// <summary>Same-path folder nodes collapsed into one — one per container FLP indexed into.</summary>
+    public int MergedContainerNodes { get; private set; }
+
+    /// <summary>Interior roots re-attached at the filesystem path embedded in their name.</summary>
+    public int GraftedRoots { get; private set; }
+
+    public IReadOnlyCollection<CostNode> Nodes => _distinctNodes;
 
     public CostNode? Find(string folderId) => _nodes.GetValueOrDefault(folderId);
 
@@ -95,11 +107,16 @@ public sealed class CostTree
                 node.Parent = parent;
                 parent.Children.Add(node);
             }
-            else
-            {
-                tree.Roots.Add(node);
-            }
         }
+
+        // Containers force two structural repairs before the tree is usable. FLP models an archive
+        // as a folder node for the container file plus an EMPTY-NAMED interior root beneath it
+        // (fldrkey "*4*"), which therefore resolves to the same path — and WinDirStat cannot show
+        // two folders with one path: the second silently steals the first's children and every sum
+        // double-books. Other container kinds root their interior tree in a folder whose name is
+        // the container's full filesystem path, leaving it disconnected entirely.
+        tree.UnifySamePathNodes();
+        tree.CollectRoots();
 
         // Attach cost rows. A folder row contributes that folder's own bytes; a file row becomes a
         // leaf of its parent folder.
@@ -138,6 +155,116 @@ public sealed class CostTree
         tree.Roots.Sort((a, b) => b.SubtreeApportionedBytes.CompareTo(a.SubtreeApportionedBytes));
         return tree;
     }
+
+    /// <summary>
+    /// Collapses folder nodes that resolve to the same path into one node, re-pointing the merged
+    /// ids so cost rows still land. The survivor is the node attached highest in the id tree (the
+    /// container itself); the empty-named interior root beneath it dissolves into it.
+    /// </summary>
+    private void UnifySamePathNodes()
+    {
+        var byPath = new Dictionary<string, List<CostNode>>(StringComparer.OrdinalIgnoreCase);
+        foreach (CostNode node in _nodes.Values)
+        {
+            if (!byPath.TryGetValue(node.Path, out List<CostNode>? group))
+                byPath[node.Path] = group = [];
+            group.Add(node);
+        }
+
+        foreach (List<CostNode> group in byPath.Values)
+        {
+            if (group.Count < 2)
+                continue;
+
+            var members = new HashSet<CostNode>(group);
+
+            // The survivor is a member whose parent lies outside the group (for a container chain
+            // that is the container node itself); a parentless member never wins over one that is
+            // still connected to the tree.
+            CostNode survivor = group.FirstOrDefault(n => n.Parent is not null && !members.Contains(n.Parent))
+                ?? group[0];
+
+            foreach (CostNode member in group)
+            {
+                if (member == survivor)
+                    continue;
+
+                // Children move to the survivor; edges between group members dissolve.
+                foreach (CostNode child in member.Children)
+                {
+                    if (!members.Contains(child))
+                    {
+                        child.Parent = survivor;
+                        survivor.Children.Add(child);
+                    }
+                }
+
+                member.Children.Clear();
+                member.Parent?.Children.Remove(member);
+                member.Parent = survivor; // keeps the member out of the root scan
+
+                _nodes[member.FolderId] = survivor;
+                MergedContainerNodes++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Finalises the distinct node list and the roots. A parentless node whose path is not a real
+    /// root (drive letter, UNC share, or an unresolved marker) is a container's interior tree that
+    /// FLP rooted separately with the container's full path as its name; it is grafted back into
+    /// the filesystem tree at that path, because as a WinDirStat root it would have to be typed as
+    /// a drive — and a fake drive both displays wrongly and hijacks the real drive's parent alias.
+    /// </summary>
+    private void CollectRoots()
+    {
+        // After unification several ids can map to one object; distinct objects have distinct paths.
+        var seen = new HashSet<CostNode>();
+        var byPath = new Dictionary<string, CostNode>(StringComparer.OrdinalIgnoreCase);
+        foreach (CostNode node in _nodes.Values)
+        {
+            if (seen.Add(node))
+            {
+                _distinctNodes.Add(node);
+                byPath.TryAdd(node.Path, node);
+            }
+        }
+
+        foreach (CostNode node in _distinctNodes)
+        {
+            if (node.Parent is not null)
+                continue;
+
+            if (IsRealRootPath(node.Path))
+            {
+                Roots.Add(node);
+                continue;
+            }
+
+            int separator = node.Path.LastIndexOf('\\');
+            string parentPath = separator > 0 ? node.Path[..separator] : string.Empty;
+
+            if (parentPath.Length > 0 && byPath.TryGetValue(parentPath, out CostNode? host) && host != node)
+            {
+                node.Parent = host;
+                host.Children.Add(node);
+                GraftedRoots++;
+            }
+            else
+            {
+                // Nowhere to graft it — keep it as a root rather than dropping its subtree; the
+                // writer emits it verbatim and the conformance check will say how WinDirStat
+                // receives it.
+                Roots.Add(node);
+            }
+        }
+    }
+
+    /// <summary>Paths that are legitimately the top of a WinDirStat tree.</summary>
+    private static bool IsRealRootPath(string path) =>
+        (path.Length == 2 && path[1] == ':')
+        || path.StartsWith(@"\\", StringComparison.Ordinal)
+        || path.StartsWith('<');
 
     /// <summary>
     /// Post-order walk: children first, then fold them plus this folder's own files and entry cost

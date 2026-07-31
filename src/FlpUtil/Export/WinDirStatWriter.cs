@@ -204,10 +204,26 @@ public static class WinDirStatWriter
         return WinDirStatFormat.FormatAttributes(mask);
     }
 
+    /// <summary>
+    /// Names inside containers are not filesystem names — an email subject can legally hold the two
+    /// things WinDirStat's parser cannot survive: a double quote ends the field early and corrupts
+    /// every later column, and an embedded newline splits the row and aborts the whole load. Both
+    /// are replaced. Applied to full paths, so a parent's sanitized path still prefixes its
+    /// children's.
+    /// </summary>
+    private static string Sanitize(string name)
+    {
+        if (name.AsSpan().IndexOfAny('"', '\r', '\n') < 0)
+            return name;
+
+        return name.Replace('"', '\'').Replace('\r', ' ').Replace('\n', ' ');
+    }
+
     private static void WriteRow(CsvWriter csv, string?[] row, string name, string itemTypeText,
         int files, int folders, long logical, long physical,
         string attributes, DateTime? lastChange, ref int unsafeValues)
     {
+        name = Sanitize(name);
         if (!WinDirStatFormat.IsSafeValue(name))
             unsafeValues++;
 

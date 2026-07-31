@@ -44,7 +44,15 @@ public static class FlpSchema
     // ---- index-level document --------------------------------------------
     public const string IndexVersion = "idxv";
 
-    /// <summary><c>itemtype</c> value seen on directory items (files are 1).</summary>
+    /// <summary>
+    /// <c>itemtype</c> value seen on directory items. Files are 1; files <em>inside</em> a
+    /// container (archive members, email attachments) are 17.
+    ///
+    /// Containers themselves appear twice: as a plain file item, and as a folder node whose
+    /// <c>fldrkey</c> ends in <c>*2*</c>, holding an empty-named child keyed <c>*4*</c> (the
+    /// interior root) whose descendants are keyed <c>*8*</c>. Filesystem directories are
+    /// keyed <c>*1*</c>.
+    /// </summary>
     public const string ItemTypeFolder = "4";
 
     /// <summary>

@@ -23,6 +23,10 @@ public static class IndexTreemapCommand
         CostTree tree = CostTree.Build(report);
 
         Console.WriteLine($"  {tree.Nodes.Count:N0} folders, {tree.Roots.Count:N0} root(s)");
+        if (tree.MergedContainerNodes > 0)
+            Console.WriteLine($"  {tree.MergedContainerNodes:N0} container node(s) unified with their interior roots");
+        if (tree.GraftedRoots > 0)
+            Console.WriteLine($"  {tree.GraftedRoots:N0} container interior tree(s) grafted at their filesystem path");
         if (tree.Orphans.Count > 0)
         {
             Console.WriteLine($"  warning: {tree.Orphans.Count:N0} row(s) could not be placed in the folder tree "

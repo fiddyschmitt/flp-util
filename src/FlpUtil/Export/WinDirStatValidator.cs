@@ -176,6 +176,13 @@ public static class WinDirStatValidator
                 }
                 else
                 {
+                    // Two containers with one path: the loader's map keeps the later row, which
+                    // silently steals the earlier one's children and leaves it a ghost. Legal to
+                    // load, but the tree it produces is not the tree the file describes.
+                    if (parents.ContainsKey(name))
+                        Note(result, $"line {lineNumber}: duplicate container path '{name}' - "
+                            + "WinDirStat will attach all children to this later row.");
+
                     parents[name] = (logical, physical);
                     if (isDrive && name.Length >= 2)
                         parents[name[..2]] = (logical, physical);

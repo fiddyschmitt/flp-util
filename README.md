@@ -232,6 +232,29 @@ WinDirStat's load rules (including its quirky field splitter, because a file onl
 parser can read is a file WinDirStat cannot read). It refuses to report success if any row would be
 dropped.
 
+### Containers (archives, PST/OST)
+
+FLP can index *inside* files — archive members and email attachments carry `itemtype` 17, and the
+container appears twice in the index: as a plain file item, and as a folder node (`fldrkey` ending
+`*2*`) holding an **empty-named interior root** (`*4*`) whose descendants (`*8*`) are the interior
+folders. Some container kinds instead root their interior tree separately, naming the root with the
+container's full filesystem path.
+
+Left alone, both shapes break the WinDirStat file: the empty-named root resolves to the same path as
+its container, producing two folder rows with one path (WinDirStat silently attaches all children to
+the later row and leaves the earlier one a ghost, and every ancestor's sum double-books), and a
+separately-rooted interior tree would have to be emitted as a fake drive — which both displays
+wrongly and hijacks the real drive's two-character parent alias, silently dropping subtrees
+(issue #1: 1,169,960 rows dropped on a real PST-heavy index). `CostTree` therefore **unifies
+same-path folder nodes** and **grafts path-named interior roots** back into the filesystem tree, so
+a container shows as one folder whose subtree is its interior — which is exactly the view you want
+when deciding whether indexing inside that PST is worth its bytes.
+
+Container-interior names are not filesystem names: an email subject can legally contain the two
+things WinDirStat's parser cannot survive (a double quote corrupts the row; an embedded newline
+aborts the whole load). The writer sanitizes emitted paths — `"` → `'`, newlines → spaces —
+consistently for parents and children, so lookups still match.
+
 ### What the treemap omits
 
 Bytes that belong to no path are left out rather than parked somewhere convenient — they cannot be
