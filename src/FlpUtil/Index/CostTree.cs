@@ -241,10 +241,26 @@ public sealed class CostTree
                 continue;
             }
 
-            int separator = node.Path.LastIndexOf('\\');
-            string parentPath = separator > 0 ? node.Path[..separator] : string.Empty;
+            // Graft at the DEEPEST ancestor that exists, walking as many missing levels as it
+            // takes — a container can sit any number of undeclared folders below the nearest one
+            // the index knows about.
+            CostNode? host = null;
+            string prefix = node.Path;
+            while (true)
+            {
+                int separator = prefix.LastIndexOf('\\');
+                if (separator <= 0)
+                    break;
 
-            if (parentPath.Length > 0 && byPath.TryGetValue(parentPath, out CostNode? host) && host != node)
+                prefix = prefix[..separator];
+                if (byPath.TryGetValue(prefix, out CostNode? candidate) && candidate != node)
+                {
+                    host = candidate;
+                    break;
+                }
+            }
+
+            if (host is not null)
             {
                 node.Parent = host;
                 host.Children.Add(node);
@@ -253,8 +269,7 @@ public sealed class CostTree
             else
             {
                 // Nowhere to graft it — keep it as a root rather than dropping its subtree; the
-                // writer emits it verbatim and the conformance check will say how WinDirStat
-                // receives it.
+                // writer places its rows by full path anyway, so nothing is lost downstream.
                 Roots.Add(node);
             }
         }
