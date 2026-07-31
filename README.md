@@ -255,6 +255,17 @@ things WinDirStat's parser cannot survive (a double quote corrupts the row; an e
 aborts the whole load). The writer sanitizes emitted paths — `"` → `'`, newlines → spaces —
 consistently for parents and children, so lookups still match.
 
+More fundamentally, the writer does not trust FLP's id-space tree for *structure* at all. Container
+folder documents can disagree with themselves about a path — same-subject emails differing only in
+case, chains resolving the same location with different casing across years of index updates,
+attachment paths implying folders no document declares — and WinDirStat's case-sensitive parent
+lookup silently drops every row on the losing side of any such disagreement. So every emitted row is
+placed in a **path trie** first, where a child's path is derived from its parent's *emitted* path:
+a parent row always exists, always precedes its children, and always agrees byte-for-byte with the
+prefix its children use. Folders that only exist because an item's path implied them are synthesized
+(and counted in the output), and sums are computed bottom-up over the trie — exact by construction,
+whatever shape FLP produces.
+
 ### What the treemap omits
 
 Bytes that belong to no path are left out rather than parked somewhere convenient — they cannot be

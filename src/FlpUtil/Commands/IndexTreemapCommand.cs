@@ -41,6 +41,9 @@ public static class IndexTreemapCommand
         Console.WriteLine($"Wrote {written.TotalRows:N0} rows to {fullPath}");
         Console.WriteLine($"  {written.FolderRows:N0} folders, {written.FileRows:N0} files, "
             + $"{written.SyntheticRows:N0} synthetic");
+        if (written.ImplicitFolders > 0)
+            Console.WriteLine($"  {written.ImplicitFolders:N0} folder(s) synthesized from item paths "
+                + "no folder document declared");
         Console.WriteLine($"  root Logical Size  {written.RootLogicalBytes,14:N0}  (exclusive bytes)");
         Console.WriteLine($"  root Physical Size {written.RootPhysicalBytes,14:N0}  (exclusive + apportioned shared)");
         Console.WriteLine($"  omitted            {written.OmittedBytes,14:N0}  (belongs to no path)");
