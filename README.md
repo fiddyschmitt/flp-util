@@ -90,6 +90,10 @@ flp-util index cost   (--path <store> | --name <index>) [--out <file.csv>] [--to
 flp-util index treemap (--path <store> | --name <index>) --out <file.csv> [--label <t>] [--open]
     Write index cost as a WinDirStat saved-results file and verify it. See below.
 
+flp-util wds validate --file <file.csv>
+    Check any WinDirStat saved-results file against the loader's real rules - the feedback
+    WinDirStat never gives (it opens empty or crashes instead).
+
 flp-util export       (--path <store> | --name <index>) --out <file.csv>
                       [--include-folders] [--raw] [--delimiter <c|tab>] [--multi-value-sep <s>]
     Export every indexed item with all metadata to CSV.
@@ -214,6 +218,8 @@ so order is free:
 | **Containers need `Files + Folders > 0`** | `GetItemsCount() > 0` gates parent registration. A folder reporting zero items becomes a dead end and everything beneath it is dropped. |
 | **Sizes are not aggregated on load** | `AddChild(child, addOnly: true)` skips the upward size propagation, so every folder row must carry its own subtree total. |
 | **Only drives may be children of the root** | An `IT_MYCOMPUTER` root with a file or directory child **crashes WinDirStat** with an access violation. |
+| **Drive naming**: `C:\` with backslash, UNC without | Children resolve through the loader's two-character alias (`C:`), which exists only for drive letters. A UNC root written as `\\server\share\` registers no usable key and **every child is silently dropped**; written bare it attaches through the verbatim name. |
+| **Parent lookup is case-sensitive** | The loader's `parentMap` uses `std::equal_to<>` — a case-mismatched parent prefix drops the row. |
 | `WinDirStat Attributes` is the `ITEMTYPE` hex | `0x10000001` root, `0x00000002` drive, `0x00000004` directory, `0x00000008` file. |
 | `Attributes` is a subset of `RHSACEOZ` | Reparse `@` is deliberately absent — WinDirStat does not emit it either. |
 | Quoted fields end at the next `"` | There is no escaped-quote handling, so a value containing `"` corrupts every later column. Windows paths cannot contain one, and quoting `Name` is required because paths may contain commas. |
@@ -293,6 +299,16 @@ compound doc store (`.cfx`):
 | Attribution | 98.4% to documents, same as the small index |
 | `index treemap` | 257,024 rows, 0 dropped, child sums exact, root + omitted = 329,509,811 = the real store size |
 | WinDirStat load | 257k-row / 46 MB file loads and populates |
+
+A later review pass over the WinDirStat output path (validated by regenerating both indexes and
+byte-comparing against the previous build's files — identical) fixed two more defects found by
+reading, not by failure: UNC-rooted indexes would have had every child silently dropped (drive rows
+now follow the naming rule above), and the validator never actually checked a drive's declared totals
+against its children, and compared parents case-insensitively where the real loader is
+case-sensitive. Both validator gaps were then demonstrated with tampered files that the old
+validator passed and the fixed one rejects. The same pass cut the large-index runtime from ~18s to
+~11.5s (per-term allocation removed, per-row formatting cached, adaptive progress clock, larger I/O
+buffers).
 
 Two bugs only this index could expose, both now fixed:
 

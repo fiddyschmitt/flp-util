@@ -248,6 +248,12 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
         // report which segment and field is being walked - that is what tells you where you are.
         using IProgressScope termProgress = _progress.Begin("measuring terms", CountTerms(raw));
 
+        // Holds the previous term's bytes for prefix elision. TermsEnum reuses its own buffer, so a
+        // copy is unavoidable — but into one growable scratch buffer, not a fresh array per term:
+        // dictionaries run to millions of terms.
+        byte[] previousTerm = new byte[128];
+        int previousTermLength = 0;
+
         int segmentNumber = 0;
         foreach (AtomicReaderContext leaf in raw.Leaves)
         {
@@ -279,7 +285,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
 
                 // .tis elides the prefix shared with the previous term, and resets at field
                 // boundaries; the pointer deltas are the previous term's data lengths.
-                byte[] previousTerm = [];
+                previousTermLength = 0;
                 long previousFreqBytes = 0, previousProxBytes = 0, previousSkipBytes = 0;
 
                 TermsEnum termsEnum = terms.GetEnumerator();
@@ -332,7 +338,9 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
                     computedPostings += termFreqBytes;
                     computedPositions += termProxBytes;
 
-                    int prefix = LuceneFormat.SharedPrefixLength(previousTerm, term.Bytes.AsSpan(term.Offset, term.Length));
+                    int prefix = LuceneFormat.SharedPrefixLength(
+                        previousTerm.AsSpan(0, previousTermLength),
+                        term.Bytes.AsSpan(term.Offset, term.Length));
                     long entryBytes = LuceneFormat.TermEntryLength(
                         prefix, term.Length - prefix, fieldNumber, docFrequency,
                         previousFreqBytes, previousProxBytes, previousSkipBytes);
@@ -365,7 +373,11 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
                         }
                     }
 
-                    previousTerm = term.Bytes.AsSpan(term.Offset, term.Length).ToArray();
+                    if (previousTerm.Length < term.Length)
+                        previousTerm = new byte[Math.Max(previousTerm.Length * 2, term.Length)];
+                    term.Bytes.AsSpan(term.Offset, term.Length).CopyTo(previousTerm);
+                    previousTermLength = term.Length;
+
                     previousFreqBytes = termFreqBytes;
                     previousProxBytes = termProxBytes;
                     previousSkipBytes = 0;

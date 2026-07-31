@@ -9,6 +9,8 @@ public sealed class WinDirStatWriteResult
     public required long RootLogicalBytes { get; init; }
     public required long RootPhysicalBytes { get; init; }
     public required int FileRows { get; init; }
+
+    /// <summary>Directory-typed rows: the folder tree plus childless indexed directories.</summary>
     public required int FolderRows { get; init; }
     public required int SyntheticRows { get; init; }
     public required int UnsafeValues { get; init; }
@@ -99,27 +101,33 @@ public static class WinDirStatWriter
         int rootFolders = tree.Roots.Sum(r => r.SubtreeFolderCount + 1);
 
         // No BOM: every WinDirStat 2.x handles its absence, but only 2.7+ skips one if present.
-        using var stream = File.Create(outputPath);
+        using var stream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 16);
         using var csv = new CsvWriter(stream, ',', writeBom: false);
         using IProgressScope scope = (progress ?? NullProgress.Instance)
             .Begin("writing rows", rootFiles + rootFolders + 1);
 
         csv.WriteRow(WinDirStatFormat.RequiredColumns);
 
+        // Reused for every row; only the cells that differ are rewritten per row.
+        var rowBuffer = new string?[WinDirStatFormat.RequiredColumns.Length];
+
         // Newest folder timestamp in the index, so the root and drives show a sensible date rather
         // than the zero FILETIME (which WinDirStat renders as 1601).
         DateTime? newest = tree.Nodes.Select(n => n.LastChange).Where(d => d is not null).DefaultIfEmpty(null).Max();
 
-        WriteRow(csv, rootLabel, WinDirStatFormat.TypeRoot, rootFiles, rootFolders,
+        WriteRow(csv, rowBuffer, rootLabel, WinDirStatFormat.RootTypeText, rootFiles, rootFolders,
             rootLogical, rootPhysical, attributes: string.Empty, lastChange: newest, ref unsafeValues);
 
         foreach (CostNode driveNode in tree.Roots)
         {
-            // A drive's name must end in a backslash: the loader takes the first two characters as
-            // the display name and registers both "C:\" and "C:" as parent keys.
-            string drivePath = driveNode.Path.EndsWith('\\') ? driveNode.Path : driveNode.Path + '\\';
+            // A drive-letter root gets the trailing backslash WinDirStat itself writes; children
+            // then attach through the two-character alias ("C:") the loader registers. A UNC root
+            // must stay exactly as-is: it has no usable alias (the loader's substr(0,2) is just
+            // "\\"), so its children can only attach through the verbatim full name.
+            bool isDriveLetter = driveNode.Path.Length == 2 && driveNode.Path[1] == ':';
+            string drivePath = isDriveLetter ? driveNode.Path + '\\' : driveNode.Path;
 
-            WriteRow(csv, drivePath, WinDirStatFormat.TypeDrive,
+            WriteRow(csv, rowBuffer, drivePath, WinDirStatFormat.DriveTypeText,
                 driveNode.SubtreeFileCount + syntheticCounts.GetValueOrDefault(driveNode.FolderId),
                 driveNode.SubtreeFolderCount,
                 driveNode.SubtreeExclusiveBytes, driveNode.SubtreeApportionedBytes,
@@ -129,18 +137,18 @@ public static class WinDirStatWriter
             // Pre-order below the drive, so a parent is always written before its children.
             foreach (CostNode node in Descendants(driveNode))
             {
-                WriteRow(csv, node.Path, WinDirStatFormat.TypeDirectory,
+                WriteRow(csv, rowBuffer, node.Path, WinDirStatFormat.DirectoryTypeText,
                     node.SubtreeFileCount + syntheticCounts.GetValueOrDefault(node.FolderId),
                     node.SubtreeFolderCount,
                     node.SubtreeExclusiveBytes, node.SubtreeApportionedBytes,
                     attributes: string.Empty, lastChange: node.LastChange, ref unsafeValues);
                 folderRows++;
 
-                EmitLeaves(csv, node, ref fileRows, ref syntheticRows, ref unsafeValues);
+                EmitLeaves(csv, rowBuffer, node, ref fileRows, ref folderRows, ref syntheticRows, ref unsafeValues);
                 scope.Report(fileRows + folderRows + syntheticRows);
             }
 
-            EmitLeaves(csv, driveNode, ref fileRows, ref syntheticRows, ref unsafeValues);
+            EmitLeaves(csv, rowBuffer, driveNode, ref fileRows, ref folderRows, ref syntheticRows, ref unsafeValues);
         }
 
         return new WinDirStatWriteResult
@@ -156,14 +164,14 @@ public static class WinDirStatWriter
         };
     }
 
-    private static void EmitLeaves(CsvWriter csv, CostNode node,
-        ref int fileRows, ref int syntheticRows, ref int unsafeValues)
+    private static void EmitLeaves(CsvWriter csv, string?[] rowBuffer, CostNode node,
+        ref int fileRows, ref int folderRows, ref int syntheticRows, ref int unsafeValues)
     {
         // The folder's own index documents, as a leaf, so the folder's size equals the sum of its
         // children exactly rather than quietly exceeding it.
         if (node.OwnExclusiveBytes > 0 || node.OwnApportionedBytes > 0)
         {
-            WriteRow(csv, Combine(node.Path, FolderEntryLeaf), WinDirStatFormat.TypeFile, 0, 0,
+            WriteRow(csv, rowBuffer, Combine(node.Path, FolderEntryLeaf), WinDirStatFormat.FileTypeText, 0, 0,
                 node.OwnExclusiveBytes, node.OwnApportionedBytes,
                 attributes: string.Empty, lastChange: node.LastChange, ref unsafeValues);
             syntheticRows++;
@@ -171,7 +179,7 @@ public static class WinDirStatWriter
 
         foreach (CostRow file in node.Files)
         {
-            WriteRow(csv, file.Owner, WinDirStatFormat.TypeFile, 0, 0,
+            WriteRow(csv, rowBuffer, file.Owner, WinDirStatFormat.FileTypeText, 0, 0,
                 file.ExclusiveBytes, file.ApportionedBytes,
                 AttributesOf(file), file.LastChange, ref unsafeValues);
             fileRows++;
@@ -181,10 +189,10 @@ public static class WinDirStatWriter
         // attaches happily; it just does not register them as parents, which is correct.
         foreach (CostRow empty in node.EmptyFolders)
         {
-            WriteRow(csv, empty.Owner, WinDirStatFormat.TypeDirectory, 0, 0,
+            WriteRow(csv, rowBuffer, empty.Owner, WinDirStatFormat.DirectoryTypeText, 0, 0,
                 empty.ExclusiveBytes, empty.ApportionedBytes,
                 AttributesOf(empty), empty.LastChange, ref unsafeValues);
-            fileRows++;
+            folderRows++;
         }
     }
 
@@ -196,24 +204,23 @@ public static class WinDirStatWriter
         return WinDirStatFormat.FormatAttributes(mask);
     }
 
-    private static void WriteRow(CsvWriter csv, string name, uint itemType,
+    private static void WriteRow(CsvWriter csv, string?[] row, string name, string itemTypeText,
         int files, int folders, long logical, long physical,
         string attributes, DateTime? lastChange, ref int unsafeValues)
     {
         if (!WinDirStatFormat.IsSafeValue(name))
             unsafeValues++;
 
-        csv.WriteRow([
-            name,
-            files.ToString(CultureInfo.InvariantCulture),
-            folders.ToString(CultureInfo.InvariantCulture),
-            logical.ToString(CultureInfo.InvariantCulture),
-            physical.ToString(CultureInfo.InvariantCulture),
-            attributes,
-            WinDirStatFormat.FormatTimestamp(lastChange),
-            WinDirStatFormat.FormatItemType(itemType),
-            WinDirStatFormat.FormatIndex(0),
-        ]);
+        row[0] = name;
+        row[1] = files.ToString(CultureInfo.InvariantCulture);
+        row[2] = folders.ToString(CultureInfo.InvariantCulture);
+        row[3] = logical.ToString(CultureInfo.InvariantCulture);
+        row[4] = physical.ToString(CultureInfo.InvariantCulture);
+        row[5] = attributes;
+        row[6] = WinDirStatFormat.FormatTimestamp(lastChange);
+        row[7] = itemTypeText;
+        row[8] = WinDirStatFormat.ZeroIndexText;
+        csv.WriteRow(row.AsSpan());
     }
 
     /// <summary>Pre-order walk of everything below <paramref name="root"/>, excluding itself.</summary>

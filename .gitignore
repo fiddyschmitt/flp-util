@@ -1,5 +1,6 @@
 bin/
 obj/
+.vs/
 
 # Local FileLocator Pro index store used for development/testing
 .flpindex/

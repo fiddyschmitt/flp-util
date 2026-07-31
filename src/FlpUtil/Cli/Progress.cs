@@ -65,6 +65,9 @@ public sealed class ConsoleProgress : IProgressSink
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private readonly TimeSpan _interval = owner._interactive ? ConsoleInterval : LogInterval;
         private TimeSpan _lastPaint = TimeSpan.FromSeconds(-1);
+        private TimeSpan _lastCheck;
+        private long _untilCheck = 1;
+        private long _checkStride = 1;
         private int _lastWidth;
         private int _lastDecile = -1;
         private long _done;
@@ -73,25 +76,47 @@ public sealed class ConsoleProgress : IProgressSink
         public void Tick(long increment = 1)
         {
             _done += increment;
-            Paint(force: false);
+            MaybePaint();
         }
 
         public void Report(long done)
         {
             _done = done;
-            Paint(force: false);
+            MaybePaint();
         }
 
         public void Detail(string? detail)
         {
             _detail = detail;
-            Paint(force: false);
+            MaybePaint();
         }
 
-        private void Paint(bool force)
+        /// <summary>
+        /// The hot gate. Reading the clock is a QueryPerformanceCounter call, and callers report
+        /// tens of millions of times; consulting it on every update would make progress itself
+        /// measurable. The stride adapts so the clock is read roughly eight times per interval,
+        /// however fast or slow the caller is ticking.
+        /// </summary>
+        private void MaybePaint()
         {
-            TimeSpan elapsed = _clock.Elapsed;
+            if (--_untilCheck > 0)
+                return;
 
+            TimeSpan elapsed = _clock.Elapsed;
+            TimeSpan sinceCheck = elapsed - _lastCheck;
+            _lastCheck = elapsed;
+
+            if (sinceCheck < _interval / 8)
+                _checkStride = Math.Min(_checkStride * 2, 65_536);
+            else if (sinceCheck > _interval && _checkStride > 1)
+                _checkStride /= 2;
+            _untilCheck = _checkStride;
+
+            Paint(elapsed);
+        }
+
+        private void Paint(TimeSpan elapsed)
+        {
             // In a log, also emit on every 10% so a run that finishes inside one interval still
             // shows movement; on a console the time-based rate limit alone is what keeps it smooth.
             bool milestone = false;
@@ -108,7 +133,7 @@ public sealed class ConsoleProgress : IProgressSink
                 }
             }
 
-            if (!force && !milestone && elapsed - _lastPaint < _interval)
+            if (!milestone && elapsed - _lastPaint < _interval)
                 return;
             _lastPaint = elapsed;
 

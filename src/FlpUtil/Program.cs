@@ -68,6 +68,9 @@ public static class Program
                 depth: cmd.GetInt("depth") ?? 0,
                 progress);
 
+        if (cmd.HasVerb("wds", "validate"))
+            return WdsValidateCommand.Run(cmd.GetRequiredString("file"), progress);
+
         if (cmd.HasVerb("index", "treemap"))
             return IndexTreemapCommand.Run(
                 ResolvePath(cmd),
@@ -129,6 +132,10 @@ public static class Program
                   WinDirStat's own load rules.
                     --label <text>    name for the root node (default "FLP index: <store>")
                     --open            launch WinDirStat with /loadfrom on the result
+
+              flp-util wds validate --file <file.csv>
+                  Check any WinDirStat saved-results file against the loader's real rules
+                  (dropped rows, child sums, root-child crash) - feedback WinDirStat never gives.
 
               flp-util export       (--path <store> | --name <index>) --out <file.csv> [options]
                   Export every indexed item, with all metadata, to CSV.

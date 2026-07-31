@@ -9,10 +9,11 @@ namespace FlpUtil.Export;
 /// </summary>
 public sealed class CsvWriter(Stream stream, char delimiter = ',', bool writeBom = true) : IDisposable
 {
-    private readonly StreamWriter _writer = new(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: writeBom))
-    {
-        NewLine = "\r\n",
-    };
+    private readonly StreamWriter _writer =
+        new(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: writeBom), bufferSize: 1 << 15)
+        {
+            NewLine = "\r\n",
+        };
 
     public void WriteRow(IEnumerable<string?> fields)
     {
@@ -23,6 +24,20 @@ public sealed class CsvWriter(Stream stream, char delimiter = ',', bool writeBom
                 _writer.Write(delimiter);
             first = false;
             WriteField(field);
+        }
+
+        _writer.Write(_writer.NewLine);
+    }
+
+    /// <summary>Same output as <see cref="WriteRow(IEnumerable{string?})"/>, for callers hot enough
+    /// to reuse a row buffer instead of allocating one per row.</summary>
+    public void WriteRow(ReadOnlySpan<string?> fields)
+    {
+        for (int i = 0; i < fields.Length; i++)
+        {
+            if (i > 0)
+                _writer.Write(delimiter);
+            WriteField(fields[i]);
         }
 
         _writer.Write(_writer.NewLine);

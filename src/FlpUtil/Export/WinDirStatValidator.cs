@@ -35,7 +35,7 @@ public static class WinDirStatValidator
 
         // Streamed rather than slurped: on a large index this file has millions of rows.
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, 1 << 16);
         using IProgressScope scope = (progress ?? NullProgress.Instance).Begin("verifying", stream.Length);
 
         string? headerLine = reader.ReadLine();
@@ -45,7 +45,8 @@ public static class WinDirStatValidator
             return result;
         }
 
-        List<string> header = SplitLine(headerLine.TrimStart('﻿'));
+        var header = new List<string>();
+        SplitLine(headerLine.TrimStart('﻿'), header);
         var columnIndex = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < header.Count; i++)
             columnIndex.TryAdd(header[i], i);
@@ -62,14 +63,17 @@ public static class WinDirStatValidator
         int maxRequired = WinDirStatFormat.RequiredColumns.Max(c => columnIndex[c]);
 
         // Mirrors WinDirStat's parentMap: a folder is only registered once it has been seen, so a
-        // child listed before its parent is unattachable.
-        var parents = new Dictionary<string, (long Logical, long Physical)>(StringComparer.OrdinalIgnoreCase);
-        var childSums = new Dictionary<string, (long Logical, long Physical)>(StringComparer.OrdinalIgnoreCase);
-        var childless = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // child listed before its parent is unattachable. Comparison is ORDINAL, because the real
+        // parentMap is a std::unordered_map with std::equal_to<> - case-SENSITIVE - and validating
+        // more leniently than the loader would let files pass that WinDirStat then drops rows from.
+        var parents = new Dictionary<string, (long Logical, long Physical)>(StringComparer.Ordinal);
+        var childSums = new Dictionary<string, (long Logical, long Physical)>(StringComparer.Ordinal);
+        var childless = new HashSet<string>(StringComparer.Ordinal);
         int roots = 0;
         string? rootName = null;
 
         int lineNumber = 1;
+        var fields = new List<string>(header.Count);
         while (reader.ReadLine() is { } line)
         {
             lineNumber++;
@@ -78,7 +82,7 @@ public static class WinDirStatValidator
             if (line.Length == 0)
                 continue; // WinDirStat skips blank lines
 
-            List<string> fields = SplitLine(line);
+            SplitLine(line, fields);
             result.DataRows++;
 
             if (fields.Count <= maxRequired)
@@ -129,8 +133,9 @@ public static class WinDirStatValidator
                 string parentPath = separator < 0 ? string.Empty : name[..separator];
 
                 // WinDirStat access-violates on a non-drive child of the pseudo root. Its loader
-                // accepts the row; the crash comes later, so this has to be caught here.
-                if (rootName is not null && string.Equals(parentPath, rootName, StringComparison.OrdinalIgnoreCase))
+                // accepts the row; the crash comes later, so this has to be caught here. Ordinal,
+                // like the loader's own lookup: a case-mismatched prefix would merely drop.
+                if (rootName is not null && string.Equals(parentPath, rootName, StringComparison.Ordinal))
                 {
                     result.Errors.Add($"line {lineNumber}: '{name}' hangs directly off the root item. "
                         + "Only drives may be children of an IT_MYCOMPUTER root - anything else crashes "
@@ -148,7 +153,14 @@ public static class WinDirStatValidator
                     continue;
                 }
 
-                Accumulate(childSums, parentPath, logical, physical);
+                // Children of a drive resolve through its two-character alias ("C:"), but the
+                // drive's declared totals live under its full name ("C:\"). Fold the sums onto the
+                // full name, otherwise the drive row's totals are never checked against anything.
+                string sumKey = parentPath.Length == 2 && parentPath[1] == ':'
+                        && parents.ContainsKey(parentPath + "\\")
+                    ? parentPath + "\\"
+                    : parentPath;
+                Accumulate(childSums, sumKey, logical, physical);
             }
 
             result.AttachedRows++;
@@ -179,8 +191,10 @@ public static class WinDirStatValidator
         result.ChildSumsMatch = true;
         foreach (var (parentPath, declared) in parents)
         {
-            if (parentPath.Length == 2 && parentPath[1] == ':')
-                continue; // the drive's alias key, already checked under its full name
+            // Skip a drive's two-character alias only when the full-name entry it duplicates
+            // exists; a drive written bare as "C:" has no such sibling and must be checked here.
+            if (parentPath.Length == 2 && parentPath[1] == ':' && parents.ContainsKey(parentPath + "\\"))
+                continue;
 
             if (!childSums.TryGetValue(parentPath, out var summed))
                 continue;
@@ -216,9 +230,9 @@ public static class WinDirStatValidator
     /// WinDirStat's own field splitter, faithfully: a quoted field ends at the next <c>"</c>, with no
     /// unescaping, and an unquoted field ends at the next comma.
     /// </summary>
-    private static List<string> SplitLine(string line)
+    private static void SplitLine(string line, List<string> fields)
     {
-        var fields = new List<string>();
+        fields.Clear();
         for (int pos = 0; pos < line.Length; pos++)
         {
             int comma = line.IndexOf(',', pos);
@@ -230,14 +244,12 @@ public static class WinDirStatValidator
                 pos++;
                 end = line.IndexOf('"', pos);
                 if (end < 0)
-                    return fields; // WinDirStat aborts the whole load here
+                    return; // WinDirStat aborts the whole load here
             }
 
             fields.Add(line[pos..end]);
             pos = end + (quoted ? 1 : 0);
         }
-
-        return fields;
     }
 
     private static uint ParseHex32(string value)

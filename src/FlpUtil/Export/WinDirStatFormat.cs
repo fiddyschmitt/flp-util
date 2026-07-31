@@ -71,6 +71,14 @@ public static class WinDirStatFormat
     public static string FormatIndex(ulong index) =>
         "0x" + index.ToString("X16", CultureInfo.InvariantCulture);
 
+    // Pre-formatted column values for the four row kinds we ever emit, so a hot writer does not
+    // re-format identical strings hundreds of thousands of times.
+    public static readonly string RootTypeText = FormatItemType(TypeRoot);
+    public static readonly string DriveTypeText = FormatItemType(TypeDrive);
+    public static readonly string DirectoryTypeText = FormatItemType(TypeDirectory);
+    public static readonly string FileTypeText = FormatItemType(TypeFile);
+    public static readonly string ZeroIndexText = FormatIndex(0);
+
     /// <summary>The exact shape <c>FromTimeString</c> expects; anything else decodes to a zero time.</summary>
     public static string FormatTimestamp(DateTime? value) =>
         value?.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture) ?? string.Empty;
