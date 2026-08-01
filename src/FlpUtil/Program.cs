@@ -8,9 +8,12 @@ namespace FlpUtil;
 
 public static class Program
 {
+    public const string Version = "0.1.0";
+
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+        Console.WriteLine($"flp-util {Version}");
 
         try
         {
