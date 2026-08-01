@@ -2,6 +2,9 @@ bin/
 obj/
 .vs/
 
+# build.cmd output
+dist/
+
 # Local FileLocator Pro index store used for development/testing
 .flpindex/
 

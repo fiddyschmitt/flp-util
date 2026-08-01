@@ -18,4 +18,10 @@
     <PackageReference Include="Lucene.Net" Version="4.8.0-beta00018" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lucene.NET finds its codecs (including the Lucene3x codec every FLP index needs) by
+         reflecting over its own assembly at runtime, so trimmed publishes must keep all of it. -->
+    <TrimmerRootAssembly Include="Lucene.Net" />
+  </ItemGroup>
+
 </Project>
