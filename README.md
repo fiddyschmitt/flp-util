@@ -1,10 +1,10 @@
 # flp-util
 See what's inside a [FileLocator Pro](https://www.mythicsoft.com/filelocatorpro/) index — export the full file list to CSV, and find out which files and folders are taking up the most index space.
 
-## Build
-Requires the .NET 10 SDK:
+## Download
+A portable executable for Windows can be found over in the [releases](https://github.com/fiddyschmitt/flp-util/releases/latest) section.
 
-`dotnet publish src/FlpUtil -c Release`
+To build from source instead, run `build.cmd` (requires the .NET 10 SDK).
 
 <br />
 
