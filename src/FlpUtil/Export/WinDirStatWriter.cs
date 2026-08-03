@@ -6,7 +6,10 @@ namespace FlpUtil.Export;
 
 public sealed class WinDirStatWriteResult
 {
+    /// <summary>Sum of plain file sizes — the Logical Size column.</summary>
     public required long RootLogicalBytes { get; init; }
+
+    /// <summary>Total index cost — the Physical Size column; plus omitted bytes it equals the store.</summary>
     public required long RootPhysicalBytes { get; init; }
     public required int FileRows { get; init; }
 
@@ -58,10 +61,12 @@ public sealed class WinDirStatWriteResult
 /// documents) are omitted rather than parked under a drive: they belong to no path and cannot be
 /// reclaimed by excluding a folder. The write result reports exactly what was left out.
 ///
-/// <c>Logical Size</c> carries exclusive bytes (what excluding the folder actually reclaims) and
-/// <c>Physical Size</c> carries exclusive plus the item's apportioned share of the joint term
-/// dictionary (which sums to the real store size). WinDirStat's "use logical size" option toggles
-/// which one drives the treemap, so both views live in one file.
+/// <c>Physical Size</c> carries index cost — exclusive bytes plus the item's apportioned share
+/// of the joint term dictionary — and sums to the real store size; it drives WinDirStat's default
+/// treemap. <c>Logical Size</c> carries the file's plain size as FLP recorded it, matching what
+/// that column means in every ordinary WinDirStat scan, so the "use logical size" option flips the
+/// same tree between an index-cost view and a familiar disk-usage view. A row whose index cost
+/// rivals its file size is content that is expensive to index — every token novel.
 /// </summary>
 public static class WinDirStatWriter
 {
@@ -78,15 +83,16 @@ public static class WinDirStatWriter
         public List<PathNode>? ChildOrder;
         public List<Leaf>? Leaves;
 
-        /// <summary>Bytes emitted as a <c>&lt;folder entry&gt;</c> leaf (the folder's own documents).</summary>
-        public long EntryLogical, EntryPhysical;
+        /// <summary>Bytes emitted as a <c>&lt;folder entry&gt;</c> leaf (the folder's own documents;
+        /// FileSize is non-zero only for containers, whose file lives at the folder's own path).</summary>
+        public long EntryFileSize, EntryPhysical;
 
         /// <summary>
         /// Bytes belonging to the folder itself with no leaf of their own — a childless indexed
         /// directory. Folded into the declared size while childless; promoted to the folder-entry
         /// leaf if children ever appear, so sums stay exact either way.
         /// </summary>
-        public long SelfLogical, SelfPhysical;
+        public long SelfFileSize, SelfPhysical;
 
         public DateTime? LastChange;
         public string Attributes = string.Empty;
@@ -98,10 +104,10 @@ public static class WinDirStatWriter
         public bool Implicit;
 
         // Computed bottom-up before emission.
-        public long SubLogical, SubPhysical;
+        public long SubFileSize, SubPhysical;
         public int FileCount, FolderCount;
 
-        public bool HasContents => (ChildOrder is { Count: > 0 }) || (Leaves is { Count: > 0 }) || EntryLogical > 0 || EntryPhysical > 0;
+        public bool HasContents => (ChildOrder is { Count: > 0 }) || (Leaves is { Count: > 0 }) || EntryPhysical > 0 || EntryFileSize > 0;
 
         public PathNode GetOrAddChild(string segment, ref int nextSequence, out bool created)
         {
@@ -123,7 +129,7 @@ public static class WinDirStatWriter
     }
 
     private readonly record struct Leaf(
-        string Name, long Logical, long Physical, string Attributes, DateTime? LastChange, int Sequence);
+        string Name, long FileSize, long Physical, string Attributes, DateTime? LastChange, int Sequence);
 
     public static WinDirStatWriteResult Write(
         string outputPath,
@@ -163,11 +169,11 @@ public static class WinDirStatWriter
         FoldLeafFolderCollisions(sentinel);
         ComputeSums(sentinel, ref implicitFolders);
 
-        long rootLogical = 0, rootPhysical = 0;
+        long rootFileSize = 0, rootPhysical = 0;
         int rootFiles = 0, rootFolders = 0;
         foreach (PathNode root in sentinel.ChildOrder ?? [])
         {
-            rootLogical += root.SubLogical;
+            rootFileSize += root.SubFileSize;
             rootPhysical += root.SubPhysical;
             rootFiles += root.FileCount;
             rootFolders += root.FolderCount + 1;
@@ -186,7 +192,7 @@ public static class WinDirStatWriter
         var rowBuffer = new string?[WinDirStatFormat.RequiredColumns.Length];
 
         WriteRow(csv, rowBuffer, rootLabel, WinDirStatFormat.RootTypeText, rootFiles, rootFolders,
-            rootLogical, rootPhysical, attributes: string.Empty, lastChange: newest, ref unsafeValues);
+            rootFileSize, rootPhysical, attributes: string.Empty, lastChange: newest, ref unsafeValues);
 
         foreach (PathNode driveNode in Ordered(sentinel.ChildOrder))
         {
@@ -199,7 +205,7 @@ public static class WinDirStatWriter
 
             WriteRow(csv, rowBuffer, drivePath, WinDirStatFormat.DriveTypeText,
                 driveNode.FileCount, driveNode.FolderCount,
-                driveNode.SubLogical, driveNode.SubPhysical,
+                driveNode.SubFileSize, driveNode.SubPhysical,
                 attributes: string.Empty, lastChange: driveNode.LastChange ?? newest, ref unsafeValues);
             folderRows++;
 
@@ -209,7 +215,7 @@ public static class WinDirStatWriter
 
         return new WinDirStatWriteResult
         {
-            RootLogicalBytes = rootLogical,
+            RootLogicalBytes = rootFileSize,
             RootPhysicalBytes = rootPhysical,
             FileRows = fileRows,
             FolderRows = folderRows,
@@ -234,7 +240,7 @@ public static class WinDirStatWriter
         {
             PathNode folder = GetFolder(sentinel, byPath, node.Path, ref nextSequence, declared: true);
 
-            folder.EntryLogical += node.OwnExclusiveBytes;
+            folder.EntryFileSize += node.OwnFileSizeBytes;
             folder.EntryPhysical += node.OwnApportionedBytes;
             folder.LastChange ??= node.LastChange;
             if (node.LastChange is { } change && (newest is null || change > newest))
@@ -246,7 +252,7 @@ public static class WinDirStatWriter
             foreach (CostRow empty in node.EmptyFolders)
             {
                 PathNode emptyNode = GetFolder(sentinel, byPath, empty.Owner, ref nextSequence, declared: true);
-                emptyNode.SelfLogical += empty.ExclusiveBytes;
+                emptyNode.SelfFileSize += empty.FileSizeBytes;
                 emptyNode.SelfPhysical += empty.ApportionedBytes;
                 emptyNode.LastChange ??= empty.LastChange;
                 if (emptyNode.Attributes.Length == 0)
@@ -341,7 +347,7 @@ public static class WinDirStatWriter
         }
         else if (string.Equals(owner, folderPath, StringComparison.OrdinalIgnoreCase))
         {
-            folder.EntryLogical += row.ExclusiveBytes;
+            folder.EntryFileSize += row.FileSizeBytes;
             folder.EntryPhysical += row.ApportionedBytes;
             folder.LastChange ??= row.LastChange;
             return;
@@ -377,7 +383,7 @@ public static class WinDirStatWriter
     {
         folder.Leaves ??= [];
         folder.Leaves.Add(new Leaf(
-            Sanitize(name), row.ExclusiveBytes, row.ApportionedBytes,
+            Sanitize(name), row.FileSizeBytes, row.ApportionedBytes,
             AttributesOf(row), row.LastChange, nextSequence++));
     }
 
@@ -404,7 +410,7 @@ public static class WinDirStatWriter
                     if (!current.Children.TryGetValue(leaf.Name, out PathNode? twin))
                         continue;
 
-                    twin.EntryLogical += leaf.Logical;
+                    twin.EntryFileSize += leaf.FileSize;
                     twin.EntryPhysical += leaf.Physical;
                     twin.LastChange ??= leaf.LastChange;
                     current.Leaves.RemoveAt(i);
@@ -444,29 +450,29 @@ public static class WinDirStatWriter
 
             // A childless folder's own bytes stay in its declared size; once it has any contents
             // they must move to the entry leaf or the children would no longer sum to the parent.
-            if (node.SelfLogical != 0 || node.SelfPhysical != 0)
+            if (node.SelfFileSize != 0 || node.SelfPhysical != 0)
             {
                 bool hasContents = (node.ChildOrder is { Count: > 0 }) || (node.Leaves is { Count: > 0 })
-                    || node.EntryLogical > 0 || node.EntryPhysical > 0;
+                    || node.EntryPhysical > 0 || node.EntryFileSize > 0;
                 if (hasContents)
                 {
-                    node.EntryLogical += node.SelfLogical;
+                    node.EntryFileSize += node.SelfFileSize;
                     node.EntryPhysical += node.SelfPhysical;
-                    node.SelfLogical = 0;
+                    node.SelfFileSize = 0;
                     node.SelfPhysical = 0;
                 }
             }
 
-            long logical = node.EntryLogical + node.SelfLogical;
+            long fileSize = node.EntryFileSize + node.SelfFileSize;
             long physical = node.EntryPhysical + node.SelfPhysical;
-            int files = node.EntryLogical > 0 || node.EntryPhysical > 0 ? 1 : 0;
+            int files = node.EntryPhysical > 0 || node.EntryFileSize > 0 ? 1 : 0;
             int folders = 0;
 
             if (node.Leaves is not null)
             {
                 foreach (Leaf leaf in node.Leaves)
                 {
-                    logical += leaf.Logical;
+                    fileSize += leaf.FileSize;
                     physical += leaf.Physical;
                     files++;
                 }
@@ -476,14 +482,14 @@ public static class WinDirStatWriter
             {
                 foreach (PathNode child in node.ChildOrder)
                 {
-                    logical += child.SubLogical;
+                    fileSize += child.SubFileSize;
                     physical += child.SubPhysical;
                     files += child.FileCount;
                     folders += child.FolderCount + 1;
                 }
             }
 
-            node.SubLogical = logical;
+            node.SubFileSize = fileSize;
             node.SubPhysical = physical;
             node.FileCount = files;
             node.FolderCount = folders;
@@ -513,16 +519,16 @@ public static class WinDirStatWriter
             if (!contentsOnly)
             {
                 WriteRow(csv, rowBuffer, path, WinDirStatFormat.DirectoryTypeText,
-                    node.FileCount, node.FolderCount, node.SubLogical, node.SubPhysical,
+                    node.FileCount, node.FolderCount, node.SubFileSize, node.SubPhysical,
                     node.Attributes, node.LastChange, ref unsafeValues);
                 folderRows++;
             }
 
             // The folder's own documents, as a leaf, so its size equals the sum of its children.
-            if (node.EntryLogical > 0 || node.EntryPhysical > 0)
+            if (node.EntryPhysical > 0 || node.EntryFileSize > 0)
             {
                 WriteRow(csv, rowBuffer, path + '\\' + FolderEntryLeaf, WinDirStatFormat.FileTypeText, 0, 0,
-                    node.EntryLogical, node.EntryPhysical,
+                    node.EntryFileSize, node.EntryPhysical,
                     attributes: string.Empty, lastChange: node.LastChange, ref unsafeValues);
                 syntheticRows++;
             }
@@ -532,7 +538,7 @@ public static class WinDirStatWriter
                 foreach (Leaf leaf in node.Leaves.OrderByDescending(l => l.Physical).ThenBy(l => l.Sequence))
                 {
                     WriteRow(csv, rowBuffer, path + '\\' + leaf.Name, WinDirStatFormat.FileTypeText, 0, 0,
-                        leaf.Logical, leaf.Physical, leaf.Attributes, leaf.LastChange, ref unsafeValues);
+                        leaf.FileSize, leaf.Physical, leaf.Attributes, leaf.LastChange, ref unsafeValues);
                     fileRows++;
                 }
             }
@@ -546,7 +552,7 @@ public static class WinDirStatWriter
                              .OrderByDescending(c => c.SubPhysical).ThenBy(c => c.Sequence))
                 {
                     WriteRow(csv, rowBuffer, path + '\\' + child.Segment, WinDirStatFormat.DirectoryTypeText, 0, 0,
-                        child.SubLogical, child.SubPhysical, child.Attributes, child.LastChange, ref unsafeValues);
+                        child.SubFileSize, child.SubPhysical, child.Attributes, child.LastChange, ref unsafeValues);
                     folderRows++;
                 }
 

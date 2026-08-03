@@ -185,9 +185,13 @@ flp-util index treemap --name "my-index" --out index-cost.wds.csv --open
 WinDirStat.exe /loadfrom index-cost.wds.csv
 ```
 
-- `Logical Size` = exclusive bytes (what excluding it reclaims); `Physical Size` = exclusive plus the
-  item's apportioned share of the joint dictionary. WinDirStat's logical/physical treemap option
-  toggles which drives the view, so both live in one file.
+- `Physical Size` = index cost: exclusive bytes plus the item's apportioned share of the joint
+  dictionary. It sums to the real store size and drives WinDirStat's default treemap.
+- `Logical Size` = the file's plain size as FLP recorded it (`sizenr`; the uncompressed size for
+  container interiors) — matching what that column means in an ordinary WinDirStat scan. Toggling
+  WinDirStat's *logical size* option therefore flips the same tree between an index-cost view and a
+  disk-usage view, and a row whose index cost rivals its file size is content that is expensive to
+  index. The precise exclusive ("reclaimable") figure remains available via `index cost --out`.
 - Each folder gets a synthetic `<folder entry>` leaf holding its own index documents, so **every
   folder's size equals the sum of its children exactly**.
 - The extension pane becomes an instant breakdown of cost by file type.

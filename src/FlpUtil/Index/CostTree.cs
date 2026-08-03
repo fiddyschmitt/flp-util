@@ -28,6 +28,12 @@ public sealed class CostNode
 
     public long OwnApportionedBytes { get; set; }
 
+    /// <summary>
+    /// Plain size of the folder's own item, as FLP recorded it. Zero for ordinary directories; for
+    /// a container (a zip or PST is both a file and a folder) this is the container file's size.
+    /// </summary>
+    public long OwnFileSizeBytes { get; set; }
+
     /// <summary>The folder's own last-modified time, as recorded in the index.</summary>
     public DateTime? LastChange { get; set; }
 
@@ -130,6 +136,7 @@ public sealed class CostTree
             {
                 own.OwnExclusiveBytes += row.ExclusiveBytes;
                 own.OwnApportionedBytes += row.ApportionedBytes;
+                own.OwnFileSizeBytes += row.FileSizeBytes;
                 own.LastChange ??= row.LastChange;
                 continue;
             }

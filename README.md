@@ -43,7 +43,7 @@ Writes a file that [WinDirStat](https://windirstat.net/) 2.x can load, so its tr
 
 `--open` launches WinDirStat automatically (set `WINDIRSTAT_PATH` if you use a portable copy, or load the file manually with `WinDirStat.exe /loadfrom cost.csv`).
 
-Toggle WinDirStat's *logical size* option to switch between the bytes you'd reclaim by excluding an item (`Logical Size`) and its full share including data jointly owned with other files (`Physical Size`).
+`Physical Size` holds the index bytes and drives the treemap; `Logical Size` holds the plain file size, so toggling WinDirStat's *logical size* option flips the same tree into a familiar disk-usage view. Anything whose index cost rivals its file size is expensive to index for what it is.
 
 <br />
 

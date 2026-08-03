@@ -44,8 +44,8 @@ public static class IndexTreemapCommand
         if (written.ImplicitFolders > 0)
             Console.WriteLine($"  {written.ImplicitFolders:N0} folder(s) synthesized from item paths "
                 + "no folder document declared");
-        Console.WriteLine($"  root Logical Size  {written.RootLogicalBytes,14:N0}  (exclusive bytes)");
-        Console.WriteLine($"  root Physical Size {written.RootPhysicalBytes,14:N0}  (exclusive + apportioned shared)");
+        Console.WriteLine($"  root Logical Size  {written.RootLogicalBytes,14:N0}  (plain file sizes, as FLP recorded them)");
+        Console.WriteLine($"  root Physical Size {written.RootPhysicalBytes,14:N0}  (index bytes, incl. apportioned shared)");
         Console.WriteLine($"  omitted            {written.OmittedBytes,14:N0}  (belongs to no path)");
         foreach (string reason in written.OmittedReasons)
             Console.WriteLine($"      {reason}");
@@ -69,7 +69,7 @@ public static class IndexTreemapCommand
         Console.WriteLine();
         Console.WriteLine("Load it with:");
         Console.WriteLine($"  WinDirStat.exe /loadfrom \"{fullPath}\"");
-        Console.WriteLine("Toggle Options > treemap logical/physical size to switch between exclusive and apportioned bytes.");
+        Console.WriteLine("The treemap shows index bytes by default; toggle Options > logical size for a plain disk-usage view.");
 
         if (open)
             Launch(fullPath);

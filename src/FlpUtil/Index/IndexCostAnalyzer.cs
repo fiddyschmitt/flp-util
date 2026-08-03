@@ -64,6 +64,10 @@ public sealed record CostRow
     /// <summary>Id of the folder containing this owner, from its <c>{fldrid}:{name}</c> item key.</summary>
     public string ParentFolderId { get; set; } = string.Empty;
 
+    /// <summary>The file's plain size as FLP recorded it (<c>sizenr</c>) — bytes of content, not
+    /// index cost. For items inside containers this is the uncompressed size.</summary>
+    public long FileSizeBytes { get; set; }
+
     /// <summary>Last-modified time recorded in the index, for tools that want to show a date.</summary>
     public DateTime? LastChange { get; set; }
 
@@ -148,6 +152,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
         var parentFolderIds = new string[maxDoc];
         var lastChange = new DateTime?[maxDoc];
         var rawAttributes = new string?[maxDoc];
+        var fileSizes = new long[maxDoc];
         Array.Fill(ownFolderIds, string.Empty);
         Array.Fill(parentFolderIds, string.Empty);
 
@@ -218,6 +223,8 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
                     lastChange[global] = FieldDecoders.TryParseFileTime(
                         doc.Get(FlpSchema.Modified), FlpEncoding.DecimalFileTime);
                     rawAttributes[global] = doc.Get(FlpSchema.Attributes);
+                    fileSizes[global] = FieldDecoders.TryParseNumber(
+                        doc.Get(FlpSchema.Size), FlpEncoding.DecimalNumber) ?? 0;
                 }
             }
         }
@@ -402,6 +409,7 @@ public sealed class IndexCostAnalyzer(FlpIndexReader reader, IProgressSink? prog
                 row.ParentFolderId = parentFolderIds[docId];
             row.LastChange ??= lastChange[docId];
             row.RawAttributes ??= rawAttributes[docId];
+            row.FileSizeBytes += fileSizes[docId];
 
             row.DocCount++;
             row.StoredBytes += storedBytes[docId];
